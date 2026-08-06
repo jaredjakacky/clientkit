@@ -1,0 +1,359 @@
+package httpclient_test
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	clientkit "github.com/jaredjakacky/clientkit"
+	"github.com/jaredjakacky/clientkit/httpclient"
+)
+
+func TestHTTPExecuteSuccessAndResponseLifecycle(t *testing.T) {
+	ended := make(chan clientkit.OperationEndEvent, 2)
+	observer := executionObserver{
+		end: func(event clientkit.OperationEndEvent) { ended <- event },
+	}
+	body := &trackedReadCloser{Reader: strings.NewReader("payload")}
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       body,
+			Request:    request,
+		}, nil
+	}, httpclient.Config{Config: clientkit.Config{Name: "lifecycle", Observer: observer}})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+
+	response, err := client.Do(request)
+	if err != nil || response == nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("Do() = (%v, %v), want 200 response", response, err)
+	}
+	select {
+	case event := <-ended:
+		t.Fatalf("operation ended before response body use: %#v", event)
+	default:
+	}
+	content, err := io.ReadAll(response.Body)
+	if err != nil || string(content) != "payload" {
+		t.Fatalf("ReadAll() = (%q, %v), want payload", content, err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatalf("Body.Close() error = %v", err)
+	}
+	event := <-ended
+	if !event.Succeeded || event.Outcome != string(httpclient.OutcomeSuccess) || event.FailureClass != clientkit.FailureNone || event.Attempts != 1 {
+		t.Fatalf("operation end = %#v, want one successful attempt", event)
+	}
+	select {
+	case duplicate := <-ended:
+		t.Fatalf("operation ended more than once: %#v", duplicate)
+	default:
+	}
+}
+
+func TestHTTPExecuteRejectedResponseUsesStandardSemantics(t *testing.T) {
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+	}, httpclient.Config{Retry: httpclient.NoRetryConfig()})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+
+	result := client.Execute(request)
+	if result.Outcome != httpclient.OutcomeHTTPError || result.FailureClass != clientkit.FailureRemoteResponse || result.StatusCode != http.StatusNotFound {
+		t.Fatalf("Execute() = %#v, want rejected 404", result)
+	}
+	if result.Err != nil || result.Response == nil || len(result.Attempts) != 1 {
+		t.Fatalf("Execute() response/error/attempts = %#v, want response with nil error", result)
+	}
+	response, err := client.Do(request)
+	if err != nil || response == nil || response.StatusCode != http.StatusNotFound {
+		t.Fatalf("Do() = (%v, %v), want standard rejected-response semantics", response, err)
+	}
+}
+
+func TestHTTPDoPreservesErrorSemantics(t *testing.T) {
+	t.Run("transport error", func(t *testing.T) {
+		transportErr := errors.New("transport unavailable")
+		client := newHTTPTestClient(t, func(*http.Request) (*http.Response, error) {
+			return nil, transportErr
+		}, httpclient.Config{Retry: httpclient.NoRetryConfig()})
+		request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+		response, err := client.Do(request)
+		if response != nil || !errors.Is(err, transportErr) {
+			t.Fatalf("Do() = (%v, %v), want nil response wrapping transport error", response, err)
+		}
+	})
+
+	t.Run("redirect policy returns response and error", func(t *testing.T) {
+		redirectErr := errors.New("redirect rejected")
+		body := &trackedReadCloser{Reader: strings.NewReader("redirect")}
+		client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+			response := redirectResponse(request)
+			response.Body = body
+			return response, nil
+		}, httpclient.Config{
+			HTTPClient: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return redirectErr }},
+			Retry:      httpclient.NoRetryConfig(),
+		})
+		request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
+		response, err := client.Do(request)
+		if response == nil || response.StatusCode != http.StatusFound || !errors.Is(err, redirectErr) {
+			t.Fatalf("Do() = (%v, %v), want redirect response and policy error", response, err)
+		}
+		if !body.closed {
+			t.Fatal("net/http did not close redirect response body after policy rejection")
+		}
+	})
+}
+
+func TestHTTPExecuteInputValidation(t *testing.T) {
+	client := newHTTPTestClient(t, nil, httpclient.Config{})
+	tests := []struct {
+		name    string
+		request *http.Request
+	}{
+		{name: "nil request"},
+		{name: "nil URL", request: &http.Request{Method: http.MethodGet}},
+		{name: "relative URL", request: &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/resource"}}},
+		{name: "opaque URL", request: &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "https", Host: "example.test", Opaque: "opaque"}}},
+		{name: "URL user information", request: mustRequest(t, "https://user@example.test/resource")},
+		{name: "URL fragment", request: mustRequest(t, "https://example.test/resource#fragment")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var body *trackedReadCloser
+			if test.request != nil {
+				body = &trackedReadCloser{Reader: strings.NewReader("payload")}
+				test.request.Body = body
+			}
+			result := client.Execute(test.request)
+			if result.Err == nil || result.FailureClass == clientkit.FailureNone || len(result.Attempts) != 0 {
+				t.Fatalf("Execute() = %#v, want pre-attempt failure", result)
+			}
+			if body != nil && !body.closed {
+				t.Fatal("pre-attempt validation did not close request body")
+			}
+		})
+	}
+
+	var nilClient *httpclient.Client
+	nilRequest := mustRequest(t, "https://example.test/resource")
+	nilBody := &trackedReadCloser{Reader: strings.NewReader("payload")}
+	nilRequest.Body = nilBody
+	result := nilClient.Execute(nilRequest)
+	if result.Err == nil || result.FailureClass != clientkit.FailureConfiguration {
+		t.Fatalf("nil Execute() = %#v, want configuration failure", result)
+	}
+	if !nilBody.closed {
+		t.Fatal("nil client did not close request body")
+	}
+}
+
+func TestHTTPExecuteCanceledContextDoesNotReachTransport(t *testing.T) {
+	calls := 0
+	client := newHTTPTestClient(t, func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("transport should not run")
+	}, httpclient.Config{Retry: httpclient.NoRetryConfig()})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	body := &trackedReadCloser{Reader: strings.NewReader("payload")}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test/resource", body)
+	result := client.Execute(request)
+	if result.Outcome != httpclient.OutcomeCanceled || result.FailureClass != clientkit.FailureCanceled || !errors.Is(result.Err, context.Canceled) || len(result.Attempts) != 0 || calls != 0 {
+		t.Fatalf("Execute() = %#v with %d calls, want pre-attempt cancellation", result, calls)
+	}
+	if !body.closed {
+		t.Fatal("pre-attempt cancellation did not close request body")
+	}
+}
+
+func TestHTTPRetryDelayRespectsTotalTimeout(t *testing.T) {
+	observer := &retryRecordingObserver{}
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+	}, httpclient.Config{
+		Config:  clientkit.Config{Name: "retry-timeout", Observer: observer},
+		Timeout: 20 * time.Millisecond,
+		Retry: httpclient.RetryConfig{
+			MaxAttempts: 2,
+			Backoff:     time.Second,
+			StatusCodes: []int{http.StatusServiceUnavailable},
+			Methods:     []string{http.MethodPut},
+		},
+	})
+	request, _ := http.NewRequest(http.MethodPut, "https://example.test/resource", strings.NewReader("payload"))
+	getBodyCalls := 0
+	request.GetBody = func() (io.ReadCloser, error) {
+		getBodyCalls++
+		return io.NopCloser(strings.NewReader("payload")), nil
+	}
+	result := client.Execute(request)
+	if result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout || !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() = %#v, want total-timeout failure during delay", result)
+	}
+	if len(result.Attempts) != 1 || observer.retryCount != 1 || getBodyCalls != 0 {
+		t.Fatalf("attempts/retries/GetBody calls = %d/%d/%d, want 1/1/0", len(result.Attempts), observer.retryCount, getBodyCalls)
+	}
+}
+
+func TestHTTPAttemptTimeout(t *testing.T) {
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	}, httpclient.Config{
+		DisableTimeout: true,
+		AttemptTimeout: 15 * time.Millisecond,
+		Retry:          httpclient.NoRetryConfig(),
+	})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+	result := client.Execute(request)
+	if result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout || !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() = %#v, want attempt timeout", result)
+	}
+}
+
+func TestHTTPConfiguredRedirectPolicy(t *testing.T) {
+	t.Run("custom rejection is a policy failure", func(t *testing.T) {
+		rejection := errors.New("redirect rejected")
+		calls := 0
+		client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+			calls++
+			return redirectResponse(request), nil
+		}, httpclient.Config{
+			HTTPClient: &http.Client{
+				CheckRedirect: func(*http.Request, []*http.Request) error { return rejection },
+			},
+			Retry: httpclient.RetryConfig{MaxAttempts: 2, Methods: []string{http.MethodGet}, RetryTransportErrors: true},
+		})
+		request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
+		result := client.Execute(request)
+		if !errors.Is(result.Err, rejection) || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 1 || calls != 1 {
+			t.Fatalf("Execute() = %#v with %d calls, want non-retried redirect policy failure", result, calls)
+		}
+	})
+
+	t.Run("ErrUseLastResponse returns caller-owned response", func(t *testing.T) {
+		client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+			return redirectResponse(request), nil
+		}, httpclient.Config{HTTPClient: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, Retry: httpclient.NoRetryConfig()})
+		request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
+		result := client.Execute(request)
+		if result.Err != nil || result.Response == nil || result.StatusCode != http.StatusFound || result.FailureClass != clientkit.FailureRemoteResponse {
+			t.Fatalf("Execute() = %#v, want rejected redirect response with nil error", result)
+		}
+		_ = result.Response.Body.Close()
+
+		request, _ = http.NewRequest(http.MethodGet, "https://example.test/start", nil)
+		response, err := client.Do(request)
+		if err != nil || response == nil || response.StatusCode != http.StatusFound {
+			t.Fatalf("Do() = (%v, %v), want caller-owned redirect response", response, err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatalf("Body.Close() error = %v", err)
+		}
+	})
+}
+
+func TestHTTPExecutionPolicyOptionValidation(t *testing.T) {
+	calls := 0
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+	}, httpclient.Config{})
+	tests := []struct {
+		name    string
+		options httpclient.DoOptions
+	}{
+		{name: "invalid retry safety", options: httpclient.DoOptions{RetrySafety: "invalid"}},
+		{name: "retry configured and disabled", options: httpclient.DoOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.NoRetryConfig(), Disable: true}}},
+		{name: "invalid retry policy", options: httpclient.DoOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.RetryConfig{MaxAttempts: -1}}}},
+		{name: "negative total timeout", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: -time.Second}}},
+		{name: "total timeout set and disabled", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: time.Second, DisableTimeout: true}}},
+		{name: "negative attempt timeout", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: -time.Second}}},
+		{name: "attempt timeout set and disabled", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: time.Second, DisableAttemptTimeout: true}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackedReadCloser{Reader: strings.NewReader("payload")}
+			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", body)
+			result := client.ExecuteWithOptions(request, test.options)
+			if result.Err == nil || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 0 {
+				t.Fatalf("ExecuteWithOptions() = %#v, want pre-attempt policy failure", result)
+			}
+			if !body.closed {
+				t.Fatal("invalid execution policy did not close request body")
+			}
+		})
+	}
+	if calls != 0 {
+		t.Fatalf("transport calls = %d, want 0 for invalid options", calls)
+	}
+}
+
+type executionObserver struct {
+	clientkit.NopObserver
+	end func(clientkit.OperationEndEvent)
+}
+
+func (o executionObserver) StartOperation(ctx context.Context, _ clientkit.OperationStartEvent) (context.Context, clientkit.OperationObservation) {
+	return ctx, clientkit.OperationObservationFunc(func(_ context.Context, event clientkit.OperationEndEvent) {
+		if o.end != nil {
+			o.end(event)
+		}
+	})
+}
+
+type retryRecordingObserver struct {
+	clientkit.NopObserver
+	attemptCount int
+	retryCount   int
+	end          clientkit.OperationEndEvent
+}
+
+func (o *retryRecordingObserver) StartOperation(ctx context.Context, _ clientkit.OperationStartEvent) (context.Context, clientkit.OperationObservation) {
+	return ctx, clientkit.OperationObservationFunc(func(_ context.Context, event clientkit.OperationEndEvent) {
+		o.end = event
+	})
+}
+
+func (o *retryRecordingObserver) ObserveAttempt(context.Context, clientkit.AttemptEvent) {
+	o.attemptCount++
+}
+
+func (o *retryRecordingObserver) ObserveRetry(context.Context, clientkit.RetryEvent) {
+	o.retryCount++
+}
+
+type trackedReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (b *trackedReadCloser) Close() error {
+	b.closed = true
+	return nil
+}
+
+func mustRequest(t *testing.T, rawURL string) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest(%q) error = %v", rawURL, err)
+	}
+	return request
+}
+
+func redirectResponse(request *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusFound,
+		Header:     http.Header{"Location": []string{"/next"}},
+		Body:       io.NopCloser(strings.NewReader("redirect")),
+		Request:    request,
+	}
+}
