@@ -1,4 +1,4 @@
-# clientkit-incubator
+# clientkit
 
 Clientkit provides transport-neutral identity, cached health, registry snapshots, and readiness integration for outbound clients.
 
