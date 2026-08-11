@@ -16,7 +16,7 @@ const (
 	DefaultCheckTimeout = 5 * time.Second
 	// DefaultCheckStaleAfter is the default age after which cached TCP health is
 	// stale.
-	DefaultCheckStaleAfter = 30 * time.Second
+	DefaultCheckStaleAfter = 90 * time.Second
 	// DefaultTLSHandshakeTimeout bounds TLS handshaking by default.
 	DefaultTLSHandshakeTimeout = 10 * time.Second
 	// DefaultTLSMinVersion is the minimum version in Clientkit's default TLS

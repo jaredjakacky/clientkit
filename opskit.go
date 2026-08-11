@@ -65,7 +65,7 @@ func (r *Registry) CheckAll(ctx context.Context) opskit.CheckSummary {
 				entry := checkers[index]
 				health := r.sanitizeHealth(entry.name, r.checkHealthSafely(ctx, entry.checker, entry.checkSlot))
 				slots[index] = clientCheckSlot{
-					result:    opskitNamedClientCheck(entry.name, entry.policy, health),
+					result:    opskitNamedClientCheck(entry.name, entry.protocol, entry.policy, health),
 					completed: true,
 				}
 			}
@@ -147,7 +147,7 @@ func unavailableClientChecks(message string, startedAt time.Time) opskit.CheckSu
 	}
 }
 
-func opskitNamedClientCheck(name string, policy ReadinessPolicy, health Health) opskit.NamedCheck {
+func opskitNamedClientCheck(name, protocol string, policy ReadinessPolicy, health Health) opskit.NamedCheck {
 	result := opskit.CheckResult{
 		Message:  health.Message,
 		Duration: opskit.NewDuration(health.Duration),
@@ -180,7 +180,7 @@ func opskitNamedClientCheck(name string, policy ReadinessPolicy, health Health) 
 		result.State = opskit.StateUnknown
 	}
 
-	return opskit.NamedCheck{Name: name, Result: result}
+	return opskit.NamedCheck{Name: name, Kind: protocol, Result: result}
 }
 
 // ComponentInfo returns the registry's immutable Opskit identity. The returned
@@ -234,7 +234,7 @@ func (r *Registry) Status(context.Context) opskit.Status {
 }
 
 // Readiness projects passive cached health and Clientkit readiness policies
-// into Opskit readiness components. Informational clients are omitted.
+// into Opskit readiness items. Informational clients are omitted.
 func (r *Registry) Readiness(context.Context) opskit.Readiness {
 	snapshot := r.Snapshot()
 	if len(snapshot.Clients) == 0 {
@@ -245,8 +245,8 @@ func (r *Registry) Readiness(context.Context) opskit.Readiness {
 	}
 
 	readiness := opskit.Readiness{
-		Ready:      true,
-		Components: make([]opskit.ReadinessItem, 0, len(snapshot.Clients)),
+		Ready: true,
+		Items: make([]opskit.ReadinessItem, 0, len(snapshot.Clients)),
 	}
 	blocking := 0
 
@@ -257,15 +257,15 @@ func (r *Registry) Readiness(context.Context) opskit.Readiness {
 
 		ready := readinessSatisfied(client.ReadinessPolicy, client.Health.State)
 		state := opskitReadinessState(client.Health.State)
-		opskitPolicy := opskit.ReadinessRequired
+		impact := opskit.ReadinessImpactBlocking
 		if !client.ReadinessPolicy.BlocksReadiness() {
-			opskitPolicy = opskit.ReadinessOptional
+			impact = opskit.ReadinessImpactNonBlocking
 			ready = client.Health.State == HealthHealthy
 		}
-		readiness.Components = append(readiness.Components, opskit.ReadinessItem{
+		readiness.Items = append(readiness.Items, opskit.ReadinessItem{
 			Name:    client.Name,
-			Kind:    "outbound_client",
-			Policy:  opskitPolicy,
+			Kind:    client.Protocol,
+			Impact:  impact,
 			Ready:   ready,
 			State:   state,
 			Reason:  string(client.ReadinessPolicy),

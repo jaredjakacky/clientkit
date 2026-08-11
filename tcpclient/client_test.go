@@ -2,8 +2,10 @@ package tcpclient_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,8 +29,8 @@ func TestTCPClientConstructionAndNormalization(t *testing.T) {
 		config.ReadinessPolicy = clientkit.ReadinessInformational
 	})
 
-	if client.Name() != "payments" || client.ReadinessPolicy() != clientkit.ReadinessInformational {
-		t.Fatalf("client identity = (%q, %q), want configured values", client.Name(), client.ReadinessPolicy())
+	if client.Name() != "payments" || client.Protocol() != tcpclient.ProtocolTCP || client.ReadinessPolicy() != clientkit.ReadinessInformational {
+		t.Fatalf("client identity = (%q, %q, %q), want configured values", client.Name(), client.Protocol(), client.ReadinessPolicy())
 	}
 	if health := client.Health(); health.State != clientkit.HealthUnknown {
 		t.Fatalf("initial Health() = %#v, want unknown", health)
@@ -75,19 +77,72 @@ func TestTCPClientSnapshotAndNilReceiver(t *testing.T) {
 		return nil, context.Canceled
 	}, nil)
 	snapshot := client.Snapshot()
-	if snapshot.Name != "payments" || snapshot.ReadinessPolicy != clientkit.ReadinessOptional || snapshot.Health.State != clientkit.HealthUnknown {
+	if snapshot.Name != "payments" || snapshot.Protocol != tcpclient.ProtocolTCP || snapshot.ReadinessPolicy != clientkit.ReadinessOptional || snapshot.Health.State != clientkit.HealthUnknown {
 		t.Fatalf("Snapshot() = %#v, want configured identity and unknown health", snapshot)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal(Snapshot()) error = %v", err)
+	}
+	if strings.Contains(string(encoded), "example.test") || strings.Contains(string(encoded), "443") {
+		t.Fatalf("Snapshot JSON = %s, want no connection configuration", encoded)
 	}
 
 	var nilClient *tcpclient.Client
+	if nilClient.Name() != "" || nilClient.Protocol() != "" || nilClient.ReadinessPolicy() != clientkit.ReadinessOptional {
+		t.Fatalf("nil client identity = (%q, %q, %q), want empty name and protocol with optional policy", nilClient.Name(), nilClient.Protocol(), nilClient.ReadinessPolicy())
+	}
 	if health := nilClient.Health(); health.State != clientkit.HealthUnknown || health.Message == "" {
 		t.Fatalf("nil Health() = %#v, want stable unknown health", health)
 	}
-	if snapshot := nilClient.Snapshot(); snapshot.Name != "" || snapshot.Health.State != clientkit.HealthUnknown {
+	if snapshot := nilClient.Snapshot(); snapshot.Name != "" || snapshot.Protocol != "" || snapshot.ReadinessPolicy != clientkit.ReadinessOptional || snapshot.Health.State != clientkit.HealthUnknown {
 		t.Fatalf("nil Snapshot() = %#v, want empty identity and unknown health", snapshot)
 	}
 	if nilClient.HealthCheckEnabled() {
 		t.Fatal("nil HealthCheckEnabled() = true")
+	}
+}
+
+func TestTCPClientProtocolIsStableAcrossConfiguration(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*tcpclient.Config)
+	}{
+		{
+			name: "built-in tcp4",
+			mutate: func(config *tcpclient.Config) {
+				config.Network = "tcp4"
+			},
+		},
+		{
+			name: "custom dialer and network",
+			mutate: func(config *tcpclient.Config) {
+				config.Network = "custom-network"
+				config.DialContext = func(context.Context, string, string) (net.Conn, error) {
+					return nil, context.Canceled
+				}
+			},
+		},
+		{
+			name: "TLS",
+			mutate: func(config *tcpclient.Config) {
+				config.TLS.Enabled = true
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := baseTCPConfig()
+			test.mutate(&config)
+			client, err := tcpclient.New(config)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if got := client.Protocol(); got != tcpclient.ProtocolTCP {
+				t.Fatalf("Protocol() = %q, want %q", got, tcpclient.ProtocolTCP)
+			}
+		})
 	}
 }
 

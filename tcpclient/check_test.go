@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -21,11 +20,7 @@ func TestTCPCheckDisabledAndNilClient(t *testing.T) {
 	if client.HealthCheckEnabled() {
 		t.Fatal("HealthCheckEnabled() = true with disabled check")
 	}
-	cached := client.Client.UpdateHealth(clientkit.Health{
-		State:     clientkit.HealthHealthy,
-		CheckedAt: time.Now().UTC(),
-		Message:   "cached",
-	})
+	cached := client.Health()
 	health := client.Check(context.Background())
 	if health.State != clientkit.HealthUnknown || health.Message != "TCP health check is disabled" || calls != 0 {
 		t.Fatalf("Check() = %#v, calls=%d; want disabled result without dial", health, calls)
@@ -215,6 +210,120 @@ func TestTCPCheckProbeAssessments(t *testing.T) {
 	}
 }
 
+func TestTCPCheckRejectsLateProbeAssessments(t *testing.T) {
+	tests := []struct {
+		name        string
+		useTimeout  bool
+		wantFailure clientkit.FailureClass
+		wantMessage string
+	}{
+		{
+			name:        "parent cancellation",
+			wantFailure: clientkit.FailureCanceled,
+			wantMessage: "TCP health probe canceled",
+		},
+		{
+			name:        "check timeout",
+			useTimeout:  true,
+			wantFailure: clientkit.FailureTimeout,
+			wantMessage: "TCP health probe timed out",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			connection, _ := newTrackedPipe(t)
+			probeContext := make(chan context.Context, 1)
+			release := make(chan struct{})
+			observer := &tcpObserver{}
+			probe := tcpclient.ConnectionProbeFunc(func(ctx context.Context, _ net.Conn) clientkit.HealthAssessment {
+				probeContext <- ctx
+				<-release
+				return clientkit.HealthAssessment{State: clientkit.HealthHealthy, Message: "late healthy result"}
+			})
+			client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+				return connection, nil
+			}, func(config *tcpclient.Config) {
+				config.Observer = observer
+				config.Check = tcpclient.CheckConfig{Enabled: true, Probe: probe}
+				if test.useTimeout {
+					config.Check.Timeout = 10 * time.Millisecond
+				} else {
+					config.Check.DisableTimeout = true
+				}
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			results := make(chan clientkit.Health, 1)
+			go func() {
+				results <- client.Check(ctx)
+			}()
+
+			var callbackContext context.Context
+			select {
+			case callbackContext = <-probeContext:
+			case <-time.After(time.Second):
+				t.Fatal("health probe was not invoked")
+			}
+			if !test.useTimeout {
+				cancel()
+			}
+			select {
+			case <-callbackContext.Done():
+			case <-time.After(time.Second):
+				t.Fatal("health probe context did not complete")
+			}
+			close(release)
+
+			var health clientkit.Health
+			select {
+			case health = <-results:
+			case <-time.After(time.Second):
+				t.Fatal("Check did not return after releasing health probe")
+			}
+			cancel()
+			if health.State != clientkit.HealthUnhealthy || health.FailureClass != test.wantFailure || health.Message != test.wantMessage {
+				t.Fatalf("Check() = %#v, want unhealthy %q %q", health, test.wantFailure, test.wantMessage)
+			}
+			if cached := client.Health(); cached != health {
+				t.Fatalf("Health() = %#v, want cached late-result rejection %#v", cached, health)
+			}
+			if !connection.closed.Load() {
+				t.Fatal("health-check connection was not closed")
+			}
+
+			events := observer.snapshot()
+			if len(events.health) != 1 || events.health[0].State != clientkit.HealthUnhealthy || events.health[0].FailureClass != test.wantFailure || events.health[0].Message != test.wantMessage {
+				t.Fatalf("health events = %#v, want matching late-result rejection", events.health)
+			}
+		})
+	}
+}
+
+func TestTCPCheckProbeCompletionWinsBeforeLaterCancellation(t *testing.T) {
+	connection, _ := newTrackedPipe(t)
+	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+		return connection, nil
+	}, func(config *tcpclient.Config) {
+		config.Check = tcpclient.CheckConfig{
+			Enabled:        true,
+			DisableTimeout: true,
+			Probe: tcpclient.ConnectionProbeFunc(func(context.Context, net.Conn) clientkit.HealthAssessment {
+				return clientkit.HealthAssessment{State: clientkit.HealthHealthy, Message: "completed"}
+			}),
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	health := client.Check(ctx)
+	if health.State != clientkit.HealthHealthy || health.FailureClass != clientkit.FailureNone || health.Message != "completed" {
+		t.Fatalf("Check() = %#v, want completed healthy assessment", health)
+	}
+	cancel()
+	if cached := client.Health(); cached != health {
+		t.Fatalf("Health() = %#v after later cancellation, want %#v", cached, health)
+	}
+}
+
 func TestTCPCheckProbeReceivesOwnedConnectionAndDeadline(t *testing.T) {
 	connection, _ := newTrackedPipe(t)
 	probeCalled := false
@@ -302,58 +411,6 @@ func TestTCPCheckCanDisableTimeout(t *testing.T) {
 	}
 }
 
-func TestTCPHealthProjectsStalenessWithoutMutatingCache(t *testing.T) {
-	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
-		return nil, context.Canceled
-	}, func(config *tcpclient.Config) {
-		config.Check = tcpclient.CheckConfig{Enabled: true, StaleAfter: time.Second}
-	})
-
-	tests := []struct {
-		name       string
-		checkedAt  time.Time
-		wantPhrase string
-	}{
-		{name: "missing timestamp", wantPhrase: "no timestamp"},
-		{name: "future timestamp", checkedAt: time.Now().UTC().Add(time.Hour), wantPhrase: "future"},
-		{name: "stale timestamp", checkedAt: time.Now().UTC().Add(-time.Hour), wantPhrase: "stale"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			raw := client.Client.UpdateHealth(clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: test.checkedAt, Message: "raw"})
-			projected := client.Health()
-			if projected.State != clientkit.HealthUnknown || !strings.Contains(projected.Message, test.wantPhrase) {
-				t.Fatalf("Health() = %#v, want unknown %q projection", projected, test.wantPhrase)
-			}
-			if cached := client.Client.Health(); cached != raw {
-				t.Fatalf("cached Health() = %#v, want unchanged %#v", cached, raw)
-			}
-		})
-	}
-
-	fresh := client.Client.UpdateHealth(clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "fresh"})
-	if got := client.Snapshot().Health; got != fresh {
-		t.Fatalf("Snapshot().Health = %#v, want fresh %#v", got, fresh)
-	}
-}
-
-func TestTCPHealthCanDisableStalenessProjection(t *testing.T) {
-	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
-		return nil, context.Canceled
-	}, func(config *tcpclient.Config) {
-		config.Check = tcpclient.CheckConfig{Enabled: true, DisableStaleAfter: true}
-	})
-	cached := client.Client.UpdateHealth(clientkit.Health{
-		State:     clientkit.HealthHealthy,
-		CheckedAt: time.Now().UTC().Add(-24 * time.Hour),
-		Message:   "old but authoritative",
-	})
-
-	if got := client.Health(); got != cached {
-		t.Fatalf("Health() = %#v, want unprojected cached health %#v", got, cached)
-	}
-}
-
 func TestTCPCheckTLSHealthMessage(t *testing.T) {
 	certificate, roots := testCertificate(t, "example.test")
 	serverResults := make(chan error, 1)
@@ -412,20 +469,6 @@ func TestTCPCheckTLSFailureMessages(t *testing.T) {
 			wantFailure: clientkit.FailureTimeout,
 			wantMessage: "TLS handshake timed out",
 		},
-		{
-			name: "handshake cancellation",
-			newContext: func() (context.Context, context.CancelFunc) {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				return ctx, func() {}
-			},
-			dial: func(t *testing.T) tcpclient.DialContextFunc {
-				connection, _ := newTrackedPipe(t)
-				return func(context.Context, string, string) (net.Conn, error) { return connection, nil }
-			},
-			wantFailure: clientkit.FailureCanceled,
-			wantMessage: "TLS handshake canceled",
-		},
 	}
 
 	for _, test := range tests {
@@ -446,4 +489,39 @@ func TestTCPCheckTLSFailureMessages(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("handshake cancellation", func(t *testing.T) {
+		connection, peer := newTrackedPipe(t)
+		handshakeStarted := make(chan struct{})
+		go func() {
+			buffer := make([]byte, 1)
+			_, _ = peer.Read(buffer)
+			close(handshakeStarted)
+		}()
+		client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+			return connection, nil
+		}, func(config *tcpclient.Config) {
+			config.Check.Enabled = true
+			config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{InsecureSkipVerify: true}}
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		results := make(chan clientkit.Health, 1)
+		go func() {
+			results <- client.Check(ctx)
+		}()
+		select {
+		case <-handshakeStarted:
+		case <-time.After(time.Second):
+			t.Fatal("TLS handshake did not start")
+		}
+		cancel()
+		select {
+		case health := <-results:
+			if health.State != clientkit.HealthUnhealthy || health.FailureClass != clientkit.FailureCanceled || health.Message != "TLS handshake canceled" {
+				t.Fatalf("Check() = %#v, want canceled TLS handshake", health)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Check did not return after TLS handshake cancellation")
+		}
+	})
 }

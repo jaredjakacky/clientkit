@@ -11,7 +11,9 @@ import (
 const MaxClientNameBytes = 64
 
 // Client stores immutable shared client policy and concurrency-safe cached
-// health. Protocol packages embed it to implement RegisteredClient.
+// health. It must be constructed with New. Protocol implementations may compose
+// it to implement RegisteredClient and manage health-recording lifecycle. It is
+// protocol-neutral and therefore is not itself a complete RegisteredClient.
 type Client struct {
 	name                   string
 	readinessPolicy        ReadinessPolicy
@@ -115,13 +117,4 @@ func (c *Client) UpdateHealth(health Health) Health {
 
 	c.health = health
 	return health
-}
-
-// Snapshot returns one passive point-in-time view of the client.
-func (c *Client) Snapshot() ClientSnapshot {
-	return ClientSnapshot{
-		Name:            c.Name(),
-		ReadinessPolicy: c.ReadinessPolicy(),
-		Health:          c.Health(),
-	}
 }

@@ -62,7 +62,8 @@ type ExecutionRetry struct {
 	// Its zero value means no custom policy was supplied. The configuration is
 	// normalized and its slices are cloned before execution begins.
 	Config RetryConfig
-	// Disable performs one network attempt and schedules no automatic retries.
+	// Disable performs one Clientkit execution attempt and schedules no automatic
+	// retries. Redirects may still cause multiple transport RoundTrips.
 	// It cannot be combined with Config.
 	Disable bool
 }
@@ -124,11 +125,11 @@ type ExecutionTimeouts struct {
 	// DisableTimeout removes Clientkit's total timeout for this operation. Caller
 	// and observer-derived cancellation and deadlines remain authoritative.
 	DisableTimeout bool
-	// AttemptTimeout overrides the timeout independently applied to every actual
-	// network attempt, including final response-body use, when positive. Zero
-	// inherits the client value, and a fresh attempt timeout begins for every
-	// retry. Negative values are invalid, and a positive value cannot be combined
-	// with DisableAttemptTimeout.
+	// AttemptTimeout overrides the timeout independently applied to every
+	// Clientkit execution attempt, including redirects and final response-body
+	// use, when positive. Zero inherits the client value, and a fresh attempt
+	// timeout begins for every retry. Negative values are invalid, and a positive
+	// value cannot be combined with DisableAttemptTimeout.
 	AttemptTimeout time.Duration
 	// DisableAttemptTimeout removes Clientkit's per-attempt timeout for this
 	// operation without disabling its total, caller, or observer-derived context.

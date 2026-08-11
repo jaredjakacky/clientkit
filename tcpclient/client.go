@@ -15,8 +15,7 @@ import (
 // Client establishes raw network connections and exposes Clientkit identity,
 // readiness, cached health, and observability.
 type Client struct {
-	// Client supplies shared Clientkit identity and cached health storage.
-	*clientkit.Client
+	core *clientkit.Client
 
 	network     string
 	address     string
@@ -115,7 +114,7 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	return &Client{
-		Client:      client,
+		core:        client,
 		network:     network,
 		address:     address,
 		dialTimeout: dialTimeout,
@@ -125,6 +124,30 @@ func New(cfg Config) (*Client, error) {
 		check:       check,
 		tls:         tlsConfig,
 	}, nil
+}
+
+// Name returns the client's immutable logical name.
+func (c *Client) Name() string {
+	if c == nil || c.core == nil {
+		return ""
+	}
+	return c.core.Name()
+}
+
+// Protocol returns the client's stable TCP family identity.
+func (c *Client) Protocol() string {
+	if c == nil || c.core == nil {
+		return ""
+	}
+	return ProtocolTCP
+}
+
+// ReadinessPolicy returns the client's immutable normalized readiness policy.
+func (c *Client) ReadinessPolicy() clientkit.ReadinessPolicy {
+	if c == nil || c.core == nil {
+		return clientkit.ReadinessOptional
+	}
+	return c.core.ReadinessPolicy()
 }
 
 func validateTCPAddress(address string) error {

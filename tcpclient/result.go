@@ -38,6 +38,7 @@ type Result struct {
 	StartedAt time.Time
 	// Duration is the complete dial operation duration.
 	Duration time.Duration
-	// Err is the original connection-establishment error.
+	// Err is the caller-visible connection-establishment error. When a custom
+	// dialer returns after its context is done, Err is the winning context error.
 	Err error
 }

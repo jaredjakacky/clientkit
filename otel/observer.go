@@ -26,7 +26,8 @@ type config struct {
 	tracerProvider         trace.TracerProvider
 	meterProvider          metric.MeterProvider
 	instrumentationVersion string
-	attributes             []attribute.KeyValue
+	spanAttributes         []attribute.KeyValue
+	metricAttributes       []attribute.KeyValue
 	errorDetails           bool
 }
 
@@ -57,16 +58,27 @@ func WithInstrumentationVersion(version string) Option {
 	}
 }
 
-// WithAttributes adds attributes to every emitted span and metric. Values must
-// remain stable and low-cardinality. Service identity such as service.name,
-// service.version, and deployment.environment should normally be configured
-// through the OpenTelemetry Resource instead of repeated here. Clientkit-owned
-// identity, outcome, success, and failure attributes take precedence over
-// conflicting keys.
-func WithAttributes(attributes ...attribute.KeyValue) Option {
+// WithSpanAttributes adds attributes to every emitted span. Values may have
+// trace-appropriate cardinality but must not contain secrets. Service identity
+// should normally be configured through the OpenTelemetry Resource instead.
+// Clientkit-owned identity, outcome, success, and failure attributes take
+// precedence over conflicting keys.
+func WithSpanAttributes(attributes ...attribute.KeyValue) Option {
 	cloned := append([]attribute.KeyValue(nil), attributes...)
 	return func(cfg *config) {
-		cfg.attributes = append(cfg.attributes, cloned...)
+		cfg.spanAttributes = append(cfg.spanAttributes, cloned...)
+	}
+}
+
+// WithMetricAttributes adds bounded attributes to every emitted Clientkit
+// metric. Values must come from a stable, low-cardinality vocabulary. Request
+// IDs, tenant IDs, URLs, endpoint names, and arbitrary errors must not be used.
+// Clientkit-owned identity, outcome, success, and failure attributes take
+// precedence over conflicting keys.
+func WithMetricAttributes(attributes ...attribute.KeyValue) Option {
+	cloned := append([]attribute.KeyValue(nil), attributes...)
+	return func(cfg *config) {
+		cfg.metricAttributes = append(cfg.metricAttributes, cloned...)
 	}
 }
 
@@ -83,10 +95,11 @@ func WithErrorDetails() Option {
 // Observer adapts Clientkit observer events to OpenTelemetry traces and
 // metrics. It is safe for concurrent use.
 type Observer struct {
-	tracer       trace.Tracer
-	metrics      instruments
-	attributes   []attribute.KeyValue
-	errorDetails bool
+	tracer                 trace.Tracer
+	metrics                instruments
+	commonSpanAttributes   []attribute.KeyValue
+	commonMetricAttributes []attribute.KeyValue
+	errorDetails           bool
 }
 
 // New constructs an OpenTelemetry observer and creates its instruments without
@@ -121,14 +134,16 @@ func New(options ...Option) (*Observer, error) {
 	}
 
 	return &Observer{
-		tracer:       cfg.tracerProvider.Tracer(instrumentationScope, tracerOptions...),
-		metrics:      values,
-		attributes:   withoutFailureClass(cfg.attributes),
-		errorDetails: cfg.errorDetails,
+		tracer:                 cfg.tracerProvider.Tracer(instrumentationScope, tracerOptions...),
+		metrics:                values,
+		commonSpanAttributes:   withoutFailureClass(cfg.spanAttributes),
+		commonMetricAttributes: withoutFailureClass(cfg.metricAttributes),
+		errorDetails:           cfg.errorDetails,
 	}, nil
 }
 
-// StartOperation starts one client span for the complete outbound operation.
+// StartOperation starts one span for the complete observed operation. Logical
+// operations use SpanKindInternal; direct remote operations use SpanKindClient.
 func (o *Observer) StartOperation(ctx context.Context, event clientkit.OperationStartEvent) (context.Context, clientkit.OperationObservation) {
 	ctx = contextOrBackground(ctx)
 	if o == nil {
@@ -136,7 +151,7 @@ func (o *Observer) StartOperation(ctx context.Context, event clientkit.Operation
 	}
 
 	options := []trace.SpanStartOption{
-		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithSpanKind(operationSpanKind(event.Kind)),
 		trace.WithAttributes(o.spanAttributes(event.Attributes, identityAttributes(event.Client, event.Protocol, event.Operation))...),
 	}
 	if !event.StartedAt.IsZero() {
@@ -219,13 +234,16 @@ func (o *Observer) ObserveHealth(ctx context.Context, event clientkit.HealthEven
 
 func (o *Observer) spanAttributes(eventAttributes []opskit.Attribute, groups ...[]attribute.KeyValue) []attribute.KeyValue {
 	all := make([][]attribute.KeyValue, 0, len(groups)+2)
-	all = append(all, o.attributes, convertAttributes(eventAttributes))
+	all = append(all, o.commonSpanAttributes, convertAttributes(eventAttributes))
 	all = append(all, groups...)
 	return mergeAttributes(all...)
 }
 
 func (o *Observer) metricAttributes(eventAttributes []opskit.Attribute, groups ...[]attribute.KeyValue) []attribute.KeyValue {
-	return o.spanAttributes(eventAttributes, groups...)
+	all := make([][]attribute.KeyValue, 0, len(groups)+2)
+	all = append(all, o.commonMetricAttributes, convertAttributes(eventAttributes))
+	all = append(all, groups...)
+	return mergeAttributes(all...)
 }
 
 type operationObservation struct {
@@ -273,6 +291,13 @@ func operationSpanName(protocol, operation string) string {
 		return "clientkit.operation"
 	}
 	return "clientkit." + protocol + "." + operation
+}
+
+func operationSpanKind(kind clientkit.OperationKind) trace.SpanKind {
+	if kind == clientkit.OperationKindRemote {
+		return trace.SpanKindClient
+	}
+	return trace.SpanKindInternal
 }
 
 func contextOrBackground(ctx context.Context) context.Context {

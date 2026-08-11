@@ -236,7 +236,13 @@ func TestTLSDialFailureClassification(t *testing.T) {
 	})
 
 	t.Run("handshake cancellation", func(t *testing.T) {
-		connection, _ := newTrackedPipe(t)
+		connection, peer := newTrackedPipe(t)
+		handshakeStarted := make(chan struct{})
+		go func() {
+			buffer := make([]byte, 1)
+			_, _ = peer.Read(buffer)
+			close(handshakeStarted)
+		}()
 		observer := &tcpObserver{}
 		client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 			return connection, nil
@@ -245,10 +251,27 @@ func TestTLSDialFailureClassification(t *testing.T) {
 			config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{InsecureSkipVerify: true}}
 		})
 		ctx, cancel := context.WithCancel(context.Background())
+		results := make(chan tcpclient.Result, 1)
+		go func() {
+			results <- client.DialResult(ctx)
+		}()
+		select {
+		case <-handshakeStarted:
+		case <-time.After(time.Second):
+			t.Fatal("TLS handshake did not start")
+		}
 		cancel()
-		result := client.DialResult(ctx)
+		var result tcpclient.Result
+		select {
+		case result = <-results:
+		case <-time.After(time.Second):
+			t.Fatal("DialResult did not return after handshake cancellation")
+		}
 		if result.Outcome != tcpclient.OutcomeCanceled || result.FailureClass != clientkit.FailureCanceled {
 			t.Fatalf("classification = (%q, %q), want canceled", result.Outcome, result.FailureClass)
+		}
+		if !errors.Is(result.Err, context.Canceled) || !connection.closed.Load() {
+			t.Fatalf("DialResult() = %#v, closed=%t; want canceled closed handshake", result, connection.closed.Load())
 		}
 		events := observer.snapshot()
 		if len(events.attempts) != 1 {
@@ -283,6 +306,153 @@ func TestTLSDialFailureClassification(t *testing.T) {
 			t.Fatalf("attempt error = %v, want context.DeadlineExceeded", events.attempts[0].Err)
 		}
 	})
+}
+
+func TestTLSHandshakeRejectsLateVerificationResults(t *testing.T) {
+	tests := []struct {
+		name              string
+		verificationError error
+		useTimeout        bool
+		wantError         error
+		wantOutcome       tcpclient.Outcome
+		wantFailure       clientkit.FailureClass
+	}{
+		{
+			name:        "verification success after parent cancellation",
+			wantError:   context.Canceled,
+			wantOutcome: tcpclient.OutcomeCanceled,
+			wantFailure: clientkit.FailureCanceled,
+		},
+		{
+			name:              "verification error after parent cancellation",
+			verificationError: errors.New("late verification failure"),
+			wantError:         context.Canceled,
+			wantOutcome:       tcpclient.OutcomeCanceled,
+			wantFailure:       clientkit.FailureCanceled,
+		},
+		{
+			name:        "verification success after handshake timeout",
+			useTimeout:  true,
+			wantError:   context.DeadlineExceeded,
+			wantOutcome: tcpclient.OutcomeTimeout,
+			wantFailure: clientkit.FailureTimeout,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			certificate, roots := testCertificate(t, "example.test")
+			connection, peer := newCloseSignalingPipe(t)
+			serverResults := make(chan error, 1)
+			go func() {
+				server := tls.Server(peer, &tls.Config{Certificates: []tls.Certificate{certificate}})
+				serverResults <- server.Handshake()
+				_ = peer.Close()
+			}()
+			verificationStarted := make(chan struct{})
+			releaseVerification := make(chan struct{})
+			observer := &tcpObserver{}
+			client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+				return connection, nil
+			}, func(config *tcpclient.Config) {
+				config.Observer = observer
+				config.TLS = tcpclient.TLSConfig{
+					Enabled: true,
+					Config: &tls.Config{
+						RootCAs: roots,
+						VerifyConnection: func(tls.ConnectionState) error {
+							close(verificationStarted)
+							<-releaseVerification
+							return test.verificationError
+						},
+					},
+				}
+				if test.useTimeout {
+					config.TLS.HandshakeTimeout = 10 * time.Millisecond
+				}
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			results := make(chan tcpclient.Result, 1)
+			go func() {
+				results <- client.DialResult(ctx)
+			}()
+			select {
+			case <-verificationStarted:
+			case <-time.After(time.Second):
+				t.Fatal("TLS verification callback did not start")
+			}
+			if !test.useTimeout {
+				cancel()
+			}
+			select {
+			case <-connection.closedSignal:
+			case <-time.After(time.Second):
+				t.Fatal("TLS context completion did not close the raw connection")
+			}
+			close(releaseVerification)
+
+			var result tcpclient.Result
+			select {
+			case result = <-results:
+			case <-time.After(time.Second):
+				t.Fatal("DialResult did not return after releasing TLS verification")
+			}
+			cancel()
+			if result.Conn != nil || !errors.Is(result.Err, test.wantError) {
+				t.Fatalf("DialResult() = %#v, want %v with no connection", result, test.wantError)
+			}
+			if result.Outcome != test.wantOutcome || result.FailureClass != test.wantFailure {
+				t.Fatalf("classification = (%q, %q), want (%q, %q)", result.Outcome, result.FailureClass, test.wantOutcome, test.wantFailure)
+			}
+			if !connection.closed.Load() {
+				t.Fatal("raw connection remained open after rejected TLS result")
+			}
+
+			events := observer.snapshot()
+			if len(events.attempts) != 1 || len(events.ends) != 1 {
+				t.Fatalf("observer events = (%d attempts, %d ends), want one each", len(events.attempts), len(events.ends))
+			}
+			if events.attempts[0].Outcome != string(test.wantOutcome) || events.attempts[0].FailureClass != test.wantFailure || !errors.Is(events.attempts[0].Err, test.wantError) {
+				t.Fatalf("attempt event = %#v, want context result matching caller", events.attempts[0])
+			}
+			if events.ends[0].Outcome != string(test.wantOutcome) || events.ends[0].FailureClass != test.wantFailure || !errors.Is(events.ends[0].Err, test.wantError) {
+				t.Fatalf("end event = %#v, want context result matching caller", events.ends[0])
+			}
+		})
+	}
+}
+
+func TestTLSHandshakeCompletionWinsBeforeLaterCancellation(t *testing.T) {
+	certificate, roots := testCertificate(t, "example.test")
+	connection, peer := newTrackedPipe(t)
+	serverResults := make(chan error, 1)
+	go func() {
+		server := tls.Server(peer, &tls.Config{Certificates: []tls.Certificate{certificate}})
+		serverResults <- server.Handshake()
+		_ = peer.Close()
+	}()
+	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+		return connection, nil
+	}, func(config *tcpclient.Config) {
+		config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{RootCAs: roots}}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := client.DialResult(ctx)
+	if result.Conn == nil || result.Err != nil || result.Outcome != tcpclient.OutcomeSuccess {
+		t.Fatalf("DialResult() = %#v, want successful TLS handshake", result)
+	}
+	if err := <-serverResults; err != nil {
+		t.Fatalf("server handshake error = %v", err)
+	}
+	cancel()
+	if connection.closed.Load() {
+		t.Fatal("later parent cancellation closed caller-owned TLS connection")
+	}
+	_ = result.Conn.Close()
+	if !connection.closed.Load() {
+		t.Fatal("caller close did not close TLS connection")
+	}
 }
 
 func tlsPipeDialer(t *testing.T, serverConfig *tls.Config, results chan<- error) tcpclient.DialContextFunc {

@@ -13,46 +13,49 @@ import (
 	"github.com/jaredjakacky/clientkit/httpclient"
 )
 
-func TestHTTPResultResponseBodyCompletionTelemetry(t *testing.T) {
-	t.Run("close without reading completes success", func(t *testing.T) {
+func TestHTTPResultResponseBodyDoesNotChangeCompletedTelemetry(t *testing.T) {
+	t.Run("close without reading preserves success", func(t *testing.T) {
 		ended := make(chan clientkit.OperationEndEvent, 2)
 		body := &trackedReadCloser{Reader: strings.NewReader("payload")}
 		client := lifecycleHTTPClient(t, body, ended)
 		response := executeLifecycleRequest(t, client)
+		event := <-ended
+		if !event.Succeeded || event.Err != nil {
+			t.Fatalf("operation end = %#v, want header-time success", event)
+		}
 		if err := response.Body.Close(); err != nil {
 			t.Fatalf("Body.Close() error = %v", err)
 		}
-		event := <-ended
-		if !event.Succeeded || event.Err != nil || !body.closed {
-			t.Fatalf("operation end = %#v with body closed %t, want success", event, body.closed)
+		if !body.closed {
+			t.Fatal("response body was not closed")
 		}
 	})
 
-	t.Run("read failure replaces observed outcome", func(t *testing.T) {
+	t.Run("read failure does not replace observed outcome", func(t *testing.T) {
 		ended := make(chan clientkit.OperationEndEvent, 2)
 		readErr := io.ErrUnexpectedEOF
 		client := lifecycleHTTPClient(t, &failingResponseBody{readErr: readErr}, ended)
 		response := executeLifecycleRequest(t, client)
+		event := <-ended
+		if !event.Succeeded || event.Outcome != string(httpclient.OutcomeSuccess) || event.FailureClass != clientkit.FailureNone || event.Err != nil {
+			t.Fatalf("operation end = %#v, want header-time success", event)
+		}
 		if _, err := response.Body.Read(make([]byte, 1)); !errors.Is(err, readErr) {
 			t.Fatalf("Body.Read() error = %v, want %v", err, readErr)
 		}
-		event := <-ended
-		if event.Succeeded || event.Outcome != string(httpclient.OutcomeTransportError) || event.FailureClass != clientkit.FailureConnectionClosed || !errors.Is(event.Err, readErr) {
-			t.Fatalf("operation end = %#v, want response-read failure", event)
-		}
 	})
 
-	t.Run("close failure replaces observed outcome", func(t *testing.T) {
+	t.Run("close failure does not replace observed outcome", func(t *testing.T) {
 		ended := make(chan clientkit.OperationEndEvent, 2)
 		closeErr := errors.New("close response body")
 		client := lifecycleHTTPClient(t, &failingResponseBody{Reader: strings.NewReader("payload"), closeErr: closeErr}, ended)
 		response := executeLifecycleRequest(t, client)
+		event := <-ended
+		if !event.Succeeded || event.Outcome != string(httpclient.OutcomeSuccess) || event.FailureClass != clientkit.FailureNone || event.Err != nil {
+			t.Fatalf("operation end = %#v, want header-time success", event)
+		}
 		if err := response.Body.Close(); !errors.Is(err, closeErr) {
 			t.Fatalf("Body.Close() error = %v, want %v", err, closeErr)
-		}
-		event := <-ended
-		if event.Succeeded || event.Outcome != string(httpclient.OutcomeTransportError) || event.FailureClass != clientkit.FailureTransport || !errors.Is(event.Err, closeErr) {
-			t.Fatalf("operation end = %#v, want response-close failure", event)
 		}
 	})
 
@@ -134,12 +137,13 @@ func TestHTTPResponseBodyHonorsExecutionTimeouts(t *testing.T) {
 				t.Fatalf("ExecuteWithOptions() = %#v, want successful response headers", result)
 			}
 
+			event := <-ended
+			if !event.Succeeded || event.Outcome != string(httpclient.OutcomeSuccess) || event.FailureClass != clientkit.FailureNone || event.Err != nil {
+				t.Fatalf("operation end = %#v, want header-time success", event)
+			}
+
 			if _, err := result.Response.Body.Read(make([]byte, 1)); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("Body.Read() error = %v, want deadline exceeded", err)
-			}
-			event := <-ended
-			if event.Succeeded || event.Outcome != string(httpclient.OutcomeTimeout) || event.FailureClass != clientkit.FailureTimeout || !errors.Is(event.Err, context.DeadlineExceeded) {
-				t.Fatalf("operation end = %#v, want body-phase timeout", event)
 			}
 			if err := result.Response.Body.Close(); err != nil {
 				t.Fatalf("Body.Close() error = %v", err)

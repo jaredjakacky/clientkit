@@ -49,21 +49,24 @@ type Registry struct {
 }
 
 type registeredClientEntry struct {
-	client RegisteredClient
-	policy ReadinessPolicy
+	client   RegisteredClient
+	protocol string
+	policy   ReadinessPolicy
 	// checkSlot serializes active checks for this client across overlapping
 	// CheckAll calls without holding the registry mutex during user code.
 	checkSlot chan struct{}
 }
 
 type validatedRegistration struct {
-	name   string
-	policy ReadinessPolicy
-	client RegisteredClient
+	name     string
+	protocol string
+	policy   ReadinessPolicy
+	client   RegisteredClient
 }
 
 type namedHealthChecker struct {
 	name      string
+	protocol  string
 	checker   HealthChecker
 	policy    ReadinessPolicy
 	checkSlot chan struct{}
@@ -172,6 +175,7 @@ func (r *Registry) healthCheckersSnapshot() []namedHealthChecker {
 		}
 		checkers = append(checkers, namedHealthChecker{
 			name:      name,
+			protocol:  entry.protocol,
 			checker:   checker,
 			policy:    entry.policy,
 			checkSlot: entry.checkSlot,
@@ -254,9 +258,9 @@ func closeIdleConnectionsSafely(closer IdleConnectionCloser) {
 
 // Register validates and adds one client to the registry. Nil interfaces and
 // typed-nil pointers are rejected. Registration captures the client's stable
-// name and readiness policy once and returns any validation or duplicate error.
-// The registry supports static composition; clients cannot be replaced or
-// unregistered.
+// name, protocol, and readiness policy once and returns any validation or
+// duplicate error. The registry supports static composition; clients cannot be
+// replaced or unregistered.
 func (r *Registry) Register(client RegisteredClient) error {
 	return r.RegisterAll(client)
 }
@@ -314,6 +318,7 @@ func (r *Registry) RegisterAll(clients ...RegisteredClient) error {
 		checkSlot <- struct{}{}
 		r.clients[registration.name] = registeredClientEntry{
 			client:    registration.client,
+			protocol:  registration.protocol,
 			policy:    registration.policy,
 			checkSlot: checkSlot,
 		}
@@ -344,6 +349,14 @@ func validateRegistration(client RegisteredClient) (validatedRegistration, error
 		return validatedRegistration{}, err
 	}
 
+	protocol, err := registeredClientProtocol(client)
+	if err != nil {
+		return validatedRegistration{}, err
+	}
+	if err := ValidateClientProtocol(protocol); err != nil {
+		return validatedRegistration{}, fmt.Errorf("clientkit: client %q: %w", name, err)
+	}
+
 	policy, err := registeredClientReadinessPolicy(client)
 	if err != nil {
 		return validatedRegistration{}, err
@@ -356,7 +369,7 @@ func validateRegistration(client RegisteredClient) (validatedRegistration, error
 		return validatedRegistration{}, fmt.Errorf("clientkit: client %q readiness policy requires an enabled health check", name)
 	}
 
-	return validatedRegistration{name: name, policy: policy, client: client}, nil
+	return validatedRegistration{name: name, protocol: protocol, policy: policy, client: client}, nil
 }
 
 func registeredClientName(client RegisteredClient) (name string, err error) {
@@ -368,6 +381,17 @@ func registeredClientName(client RegisteredClient) (name string, err error) {
 	}()
 
 	return client.Name(), nil
+}
+
+func registeredClientProtocol(client RegisteredClient) (protocol string, err error) {
+	defer func() {
+		if recover() != nil {
+			protocol = ""
+			err = errors.New("clientkit: client protocol panicked")
+		}
+	}()
+
+	return client.Protocol(), nil
 }
 
 func registeredClientReadinessPolicy(client RegisteredClient) (policy ReadinessPolicy, err error) {
@@ -440,6 +464,7 @@ func (r *Registry) Snapshot() RegistrySnapshot {
 	for _, namedClient := range entries {
 		clients = append(clients, ClientSnapshot{
 			Name:            namedClient.name,
+			Protocol:        namedClient.entry.protocol,
 			ReadinessPolicy: namedClient.entry.policy,
 			Health:          r.sanitizeHealth(namedClient.name, registeredClientHealth(namedClient.entry.client)),
 		})

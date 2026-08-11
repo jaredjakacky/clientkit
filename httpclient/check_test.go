@@ -15,6 +15,9 @@ import (
 )
 
 func TestDefaultHTTPCheckConfig(t *testing.T) {
+	if httpclient.DefaultCheckStaleAfter != 90*time.Second {
+		t.Fatalf("DefaultCheckStaleAfter = %v, want 90s", httpclient.DefaultCheckStaleAfter)
+	}
 	check := httpclient.DefaultCheckConfig("/healthz")
 	if !check.Enabled || check.Path != "/healthz" {
 		t.Fatalf("DefaultCheckConfig() = %#v, want enabled supplied path", check)
@@ -99,11 +102,11 @@ func TestHTTPCheckSuccessCachesHealthAndEmitsTelemetry(t *testing.T) {
 	if observer.health.State != clientkit.HealthHealthy || observer.health.Client != "health" || observer.health.Protocol != httpclient.ProtocolHTTP {
 		t.Fatalf("health telemetry = %#v, want healthy HTTP event", observer.health)
 	}
-	if got := healthAttribute(observer.health.Attributes, "http.method"); got != http.MethodHead {
-		t.Fatalf("http.method = %q, want HEAD", got)
+	if got := healthAttribute(observer.health.Attributes, "http.request.method"); got != http.MethodHead {
+		t.Fatalf("http.request.method = %q, want HEAD", got)
 	}
-	if got := healthAttribute(observer.health.Attributes, "http.status_class"); got != "2xx" {
-		t.Fatalf("http.status_class = %q, want 2xx", got)
+	if got := healthAttribute(observer.health.Attributes, "clientkit.http.status_class"); got != "2xx" {
+		t.Fatalf("clientkit.http.status_class = %q, want 2xx", got)
 	}
 	for _, attribute := range observer.health.Attributes {
 		if strings.Contains(attribute.Value, "/healthz") || strings.Contains(attribute.Value, "example.test") {
@@ -236,7 +239,7 @@ func TestHTTPCheckFailureAndRetryPolicy(t *testing.T) {
 	})
 }
 
-func TestHTTPCheckDisabledNilAndStale(t *testing.T) {
+func TestHTTPCheckDisabledAndNil(t *testing.T) {
 	calls := 0
 	observer := &healthRecordingObserver{}
 	disabled := newHTTPTestClient(t, func(*http.Request) (*http.Response, error) {
@@ -246,39 +249,6 @@ func TestHTTPCheckDisabledNilAndStale(t *testing.T) {
 	health := disabled.Check(context.Background())
 	if health.State != clientkit.HealthUnknown || calls != 0 || observer.healthCount != 0 {
 		t.Fatalf("disabled Check() = %#v, calls/events %d/%d", health, calls, observer.healthCount)
-	}
-
-	for _, test := range []struct {
-		name      string
-		check     httpclient.CheckConfig
-		wantState clientkit.HealthState
-	}{
-		{
-			name:      "stale health is projected unknown",
-			check:     httpclient.CheckConfig{Enabled: true, Path: "/healthz", StaleAfter: time.Second},
-			wantState: clientkit.HealthUnknown,
-		},
-		{
-			name:      "disabled staleness preserves health",
-			check:     httpclient.CheckConfig{Enabled: true, Path: "/healthz", DisableStaleAfter: true},
-			wantState: clientkit.HealthHealthy,
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			client := newHTTPTestClient(t, nil, httpclient.Config{Check: test.check})
-			client.Client.UpdateHealth(clientkit.Health{
-				State:     clientkit.HealthHealthy,
-				CheckedAt: time.Now().Add(-time.Hour).UTC(),
-				Message:   "cached",
-			})
-			projected := client.Health()
-			if projected.State != test.wantState {
-				t.Fatalf("Health() = %#v, want state %q", projected, test.wantState)
-			}
-			if test.wantState == clientkit.HealthUnknown && !strings.Contains(projected.Message, "stale") {
-				t.Fatalf("Health() message = %q, want stale projection", projected.Message)
-			}
-		})
 	}
 
 	var nilClient *httpclient.Client

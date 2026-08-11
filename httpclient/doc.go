@@ -24,19 +24,36 @@
 //
 // # Observability and readiness
 //
-// OpenTelemetry operation spans, metrics, and global trace propagation use
-// their defaults when the respective Observer and Propagator fields are nil. A
-// non-nil value completely replaces its default; use NopObserver or
-// NopHeaderPropagator to disable one, and the Multi variants to compose behavior
-// explicitly. Global OpenTelemetry providers and the global text-map propagator
-// are selected when a Client is constructed, so applications should configure
-// them first. Clientkit performs no later global lookup; OpenTelemetry may still
-// activate an initially captured delegating no-op when the first global is
-// installed. Later replacements apply to newly constructed clients. Registry
-// readiness reads cached health and never performs synchronous dependency calls.
-// Clientkit-controlled telemetry excludes paths, URLs, headers, and bodies. The
-// default OpenTelemetry observer also omits raw operation errors; an explicitly
-// configured otel.Observer may opt into them with otel.WithErrorDetails.
+// With the owned default net/http client and a nil Observer, Clientkit emits one
+// INTERNAL span for the complete logical operation and one CLIENT span for each
+// transport RoundTrip, including redirects and retries. Trace context is
+// injected from each CLIENT span. Logical and physical spans end when response
+// headers or a terminal error are available; they do not depend on callers
+// reading or closing response bodies. Clientkit's execution contexts remain
+// attached to a returned body until it completes, is closed, or its context is
+// done, so callers should still close bodies promptly.
+//
+// A caller-supplied HTTPClient is never mutated or automatically instrumented.
+// Likewise, a non-nil Observer completely replaces automatic observation. Use
+// otel.NewTransport on a caller-owned transport when physical OpenTelemetry
+// spans are wanted with either of those configurations. This explicit boundary
+// avoids duplicate spans when the supplied transport is already instrumented.
+// NopObserver and NopHeaderPropagator disable their respective behavior, while
+// the Multi variants compose behavior explicitly.
+//
+// Global OpenTelemetry providers and the global text-map propagator are selected
+// when an observer, transport, or Client is constructed, so applications should
+// configure them first. Applications own the OpenTelemetry SDK and exporter
+// lifecycle. Registry readiness reads cached health and never performs
+// synchronous dependency calls.
+// HTTP clients report the stable protocol category "http" for both HTTP and
+// HTTPS endpoints. Clientkit-controlled telemetry and operational snapshots
+// exclude paths, URLs, headers, and bodies. The default OpenTelemetry observer
+// also omits raw operation errors; an explicitly configured otel.Observer may
+// opt into them with otel.WithErrorDetails. Standard HTTP request-duration
+// metrics and request-target span attributes require explicit transport options
+// because their server and path dimensions may be sensitive or unsuitable for
+// low-cardinality defaults.
 //
 // # Context metadata
 //

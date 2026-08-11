@@ -10,13 +10,14 @@ import (
 
 	"github.com/jaredjakacky/clientkit"
 	"github.com/jaredjakacky/clientkit/internal/configvalue"
+	"github.com/jaredjakacky/clientkit/internal/httpotel"
 	clientkitotel "github.com/jaredjakacky/clientkit/otel"
 )
 
 // Client executes HTTP requests and optionally maintains cached dependency
 // health through explicitly enabled checks.
 type Client struct {
-	*clientkit.Client
+	core               *clientkit.Client
 	baseURL            *url.URL
 	httpClient         *http.Client
 	timeout            time.Duration
@@ -27,6 +28,7 @@ type Client struct {
 	responseClassifier safeResponseClassifier
 	allowCrossOrigin   bool
 	allowHostOverride  bool
+	transportInjects   bool
 }
 
 var (
@@ -104,6 +106,8 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 
+	usesOwnedHTTPClient := cfg.HTTPClient == nil
+	usesDefaultObserver := cfg.Config.Observer == nil
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = DefaultHTTPClient()
@@ -126,20 +130,58 @@ func New(cfg Config) (*Client, error) {
 	if propagator == nil {
 		propagator = newDefaultOpenTelemetryHeaderPropagator()
 	}
+	propagator = SafeHeaderPropagator(propagator)
+
+	transportInjects := false
+	if usesOwnedHTTPClient && usesDefaultObserver {
+		instrumented, err := httpotel.NewTransport(httpClient.Transport, httpotel.Config{
+			Inject: propagator.Inject,
+		})
+		if err != nil {
+			return nil, err
+		}
+		httpClient.Transport = instrumented
+		transportInjects = true
+	}
 
 	return &Client{
-		Client:             client,
+		core:               client,
 		baseURL:            baseURL,
 		httpClient:         httpClient,
 		timeout:            timeout,
 		attemptTimeout:     attemptTimeout,
 		check:              check,
 		retry:              retry,
-		propagator:         SafeHeaderPropagator(propagator),
+		propagator:         propagator,
 		responseClassifier: normalizeResponseClassifier(cfg.ResponseClassifier),
 		allowCrossOrigin:   cfg.AllowCrossOrigin,
 		allowHostOverride:  cfg.AllowHostOverride,
+		transportInjects:   transportInjects,
 	}, nil
+}
+
+// Name returns the client's immutable logical name.
+func (c *Client) Name() string {
+	if c == nil || c.core == nil {
+		return ""
+	}
+	return c.core.Name()
+}
+
+// Protocol returns the client's stable HTTP family identity.
+func (c *Client) Protocol() string {
+	if c == nil || c.core == nil {
+		return ""
+	}
+	return ProtocolHTTP
+}
+
+// ReadinessPolicy returns the client's immutable normalized readiness policy.
+func (c *Client) ReadinessPolicy() clientkit.ReadinessPolicy {
+	if c == nil || c.core == nil {
+		return clientkit.ReadinessOptional
+	}
+	return c.core.ReadinessPolicy()
 }
 
 // CloseIdleConnections synchronously closes currently idle connections held by
@@ -166,7 +208,7 @@ func (c *Client) CloseIdleConnections() {
 // Propagator returns the client's concurrency-safe outbound header propagator.
 // A nil or unusable client returns NopHeaderPropagator.
 func (c *Client) Propagator() HeaderPropagator {
-	if c == nil || c.Client == nil || c.propagator == nil {
+	if c == nil || c.core == nil || c.propagator == nil {
 		return NopHeaderPropagator{}
 	}
 	return c.propagator
@@ -176,7 +218,7 @@ func (c *Client) Propagator() HeaderPropagator {
 // response classifier. A nil or unusable client returns the default 2xx
 // classifier.
 func (c *Client) ResponseClassifier() ResponseClassifier {
-	if c == nil || c.Client == nil || c.responseClassifier.classifier == nil {
+	if c == nil || c.core == nil || c.responseClassifier.classifier == nil {
 		return normalizeResponseClassifier(nil)
 	}
 	return c.responseClassifier
@@ -185,12 +227,9 @@ func (c *Client) ResponseClassifier() ResponseClassifier {
 // Snapshot returns the client's identity, readiness policy, and effective
 // cached health. It never performs a synchronous dependency check.
 func (c *Client) Snapshot() clientkit.ClientSnapshot {
-	if c == nil || c.Client == nil {
-		return clientkit.ClientSnapshot{Health: c.Health()}
-	}
-
 	return clientkit.ClientSnapshot{
 		Name:            c.Name(),
+		Protocol:        c.Protocol(),
 		ReadinessPolicy: c.ReadinessPolicy(),
 		Health:          c.Health(),
 	}

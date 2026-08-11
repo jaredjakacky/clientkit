@@ -20,7 +20,7 @@ const (
 	// CONNECT, and custom methods do not.
 	RetrySafetyDefault RetrySafety = ""
 	// RetrySafetyNever disables automatic retries for one operation while still
-	// allowing its initial network attempt.
+	// allowing its initial Clientkit execution attempt.
 	RetrySafetyNever RetrySafety = "never"
 	// RetrySafetyIdempotent asserts that repeating the complete operation is
 	// semantically safe. This is an application assertion, not a Clientkit

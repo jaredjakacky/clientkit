@@ -50,7 +50,18 @@ type deadlineIgnoringConnection struct {
 	*trackedConnection
 }
 
+type closeSignalingConnection struct {
+	*trackedConnection
+	closedSignal chan struct{}
+	closeOnce    sync.Once
+}
+
 func (*deadlineIgnoringConnection) SetDeadline(time.Time) error { return nil }
+
+func (c *closeSignalingConnection) Close() error {
+	c.closeOnce.Do(func() { close(c.closedSignal) })
+	return c.trackedConnection.Close()
+}
 
 func (c *trackedConnection) Close() error {
 	c.closed.Store(true)
@@ -79,6 +90,15 @@ func newTrackedPipe(t *testing.T) (*trackedConnection, net.Conn) {
 		_ = peer.Close()
 	})
 	return tracked, peer
+}
+
+func newCloseSignalingPipe(t *testing.T) (*closeSignalingConnection, net.Conn) {
+	t.Helper()
+	connection, peer := newTrackedPipe(t)
+	return &closeSignalingConnection{
+		trackedConnection: connection,
+		closedSignal:      make(chan struct{}),
+	}, peer
 }
 
 type tcpObserver struct {
@@ -148,5 +168,6 @@ func (timeoutError) Temporary() bool { return true }
 
 var _ net.Conn = (*trackedConnection)(nil)
 var _ net.Conn = (*deadlineIgnoringConnection)(nil)
+var _ net.Conn = (*closeSignalingConnection)(nil)
 var _ clientkit.Observer = (*tcpObserver)(nil)
 var _ net.Error = timeoutError{}
