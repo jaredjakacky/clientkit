@@ -18,7 +18,7 @@ func TestObserverRecordsEveryMetricWithValuesAndAttributes(t *testing.T) {
 	observer, err := clientkitotel.New(
 		clientkitotel.WithTracerProvider(traces),
 		clientkitotel.WithMeterProvider(meters),
-		clientkitotel.WithAttributes(attribute.String("environment", "test")),
+		clientkitotel.WithMetricAttributes(attribute.String("environment", "test")),
 	)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -35,7 +35,7 @@ func TestObserverRecordsEveryMetricWithValuesAndAttributes(t *testing.T) {
 		Duration:     500 * time.Millisecond,
 		Outcome:      "timeout",
 		FailureClass: clientkit.FailureTimeout,
-		Attributes:   []opskit.Attribute{{Key: "http.method", Value: "GET"}},
+		Attributes:   []opskit.Attribute{{Key: "http.request.method", Value: "GET"}},
 	})
 	observer.ObserveRetry(ctx, clientkit.RetryEvent{
 		Client:       "payments",
@@ -119,7 +119,7 @@ func TestObserverRecordsEveryMetricWithValuesAndAttributes(t *testing.T) {
 	if metricAttributeValue(t, attemptMetric, clientkitotel.AttributeOutcome).AsString() != "timeout" ||
 		metricAttributeValue(t, attemptMetric, clientkitotel.AttributeSucceeded).AsBool() ||
 		metricAttributeValue(t, attemptMetric, clientkitotel.AttributeFailureClass).AsString() != string(clientkit.FailureTimeout) ||
-		metricAttributeValue(t, attemptMetric, "http.method").AsString() != "GET" {
+		metricAttributeValue(t, attemptMetric, "http.request.method").AsString() != "GET" {
 		t.Fatalf("attempt metric attributes = %#v, want normalized timeout and method", attemptMetric.attributes.ToSlice())
 	}
 	assertNoMetricAttribute(t, attemptMetric, clientkitotel.AttributeAttemptNumber)
@@ -135,6 +135,27 @@ func TestObserverRecordsEveryMetricWithValuesAndAttributes(t *testing.T) {
 		metricAttributeValue(t, healthMetric, clientkitotel.AttributeFailureClass).AsString() != string(clientkit.FailureRemoteResponse) {
 		t.Fatalf("health metric attributes = %#v, want degraded", healthMetric.attributes.ToSlice())
 	}
+}
+
+func TestSpanAndMetricAttributesRemainSignalSpecific(t *testing.T) {
+	telemetry := newTelemetryFixture(t,
+		clientkitotel.WithSpanAttributes(attribute.String("trace.only", "trace-value")),
+		clientkitotel.WithMetricAttributes(attribute.String("metric.only", "metric-value")),
+	)
+	ctx, operation := telemetry.observer.StartOperation(context.Background(), clientkit.OperationStartEvent{})
+	operation.End(ctx, clientkit.OperationEndEvent{Succeeded: true})
+
+	span := telemetry.traces.spans()[0]
+	if got := attributeValue(t, span.Attributes, "trace.only").AsString(); got != "trace-value" {
+		t.Fatalf("trace.only = %q, want trace-value", got)
+	}
+	assertNoAttribute(t, span.Attributes, "metric.only")
+
+	metricRecord := onlyMetricRecord(t, telemetry.metrics.records(), "clientkit.operations")
+	if got := metricAttributeValue(t, metricRecord, "metric.only").AsString(); got != "metric-value" {
+		t.Fatalf("metric.only = %q, want metric-value", got)
+	}
+	assertNoMetricAttribute(t, metricRecord, "trace.only")
 }
 
 func TestNegativeMetricValuesOmitOnlyHistograms(t *testing.T) {

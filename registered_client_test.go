@@ -11,13 +11,18 @@ import (
 )
 
 type publicRegisteredClient struct {
-	name   string
-	policy clientkit.ReadinessPolicy
-	health clientkit.Health
+	name     string
+	protocol string
+	policy   clientkit.ReadinessPolicy
+	health   clientkit.Health
 }
 
 func (c *publicRegisteredClient) Name() string {
 	return c.name
+}
+
+func (c *publicRegisteredClient) Protocol() string {
+	return c.protocol
 }
 
 func (c *publicRegisteredClient) ReadinessPolicy() clientkit.ReadinessPolicy {
@@ -57,6 +62,7 @@ func TestRegistrySnapshotJSONContract(t *testing.T) {
 		Clients: []clientkit.ClientSnapshot{
 			{
 				Name:            "payments",
+				Protocol:        "http",
 				ReadinessPolicy: clientkit.ReadinessDegradedAllowed,
 				Health: clientkit.Health{
 					State:        clientkit.HealthDegraded,
@@ -73,7 +79,7 @@ func TestRegistrySnapshotJSONContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
-	const wantJSON = `{"clients":[{"name":"payments","readiness_policy":"degraded_allowed","health":{"state":"degraded","failure_class":"remote_response","checked_at":"2026-08-05T14:30:00.123Z","duration":1500000000,"message":"fallback available"}}]}`
+	const wantJSON = `{"clients":[{"name":"payments","protocol":"http","readiness_policy":"degraded_allowed","health":{"state":"degraded","failure_class":"remote_response","checked_at":"2026-08-05T14:30:00.123Z","duration":1500000000,"message":"fallback available"}}]}`
 	if string(encoded) != wantJSON {
 		t.Fatalf("json.Marshal() = %s, want %s", encoded, wantJSON)
 	}

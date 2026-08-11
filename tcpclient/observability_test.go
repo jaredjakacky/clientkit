@@ -93,7 +93,7 @@ func TestTCPDialObserverLifecycle(t *testing.T) {
 		t.Fatalf("observer counts = (%d starts, %d attempts, %d ends, %d health), want 1,1,1,0", len(events.starts), len(events.attempts), len(events.ends), len(events.health))
 	}
 	start, attempt, end := events.starts[0], events.attempts[0], events.ends[0]
-	if start.Client != "payments" || start.Protocol != tcpclient.ProtocolTCP || start.Operation != tcpclient.OperationDial || start.StartedAt.Location() != time.UTC {
+	if start.Kind != clientkit.OperationKindRemote || start.Client != "payments" || start.Protocol != tcpclient.ProtocolTCP || start.Operation != tcpclient.OperationDial || start.StartedAt.Location() != time.UTC {
 		t.Fatalf("start event = %#v, want TCP dial identity", start)
 	}
 	if attempt.Number != 1 || !attempt.Succeeded || attempt.Outcome != string(tcpclient.OutcomeSuccess) || attempt.FailureClass != clientkit.FailureNone || attempt.Err != nil {

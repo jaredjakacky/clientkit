@@ -6,12 +6,17 @@ import "context"
 //
 // RegisteredClient should normally be implemented by a pointer or value type.
 // Registry registration rejects nil interfaces and typed-nil pointers. The
-// registry captures Name and ReadinessPolicy once during registration, and
-// implementations must keep that metadata stable. After registration,
-// implementations must remain safe for concurrent operational use.
+// registry captures Name, Protocol, and ReadinessPolicy once during
+// registration, and implementations must keep that metadata stable. After
+// registration, implementations must remain safe for concurrent operational
+// use.
 type RegisteredClient interface {
 	// Name returns a stable name accepted by ValidateClientName.
 	Name() string
+	// Protocol returns a stable, low-cardinality client-family category accepted
+	// by ValidateClientProtocol. It must not contain an endpoint or other
+	// sensitive configuration.
+	Protocol() string
 	// ReadinessPolicy returns stable policy metadata.
 	ReadinessPolicy() ReadinessPolicy
 	// Health returns cached health without performing dependency I/O.
@@ -56,6 +61,8 @@ type IdleConnectionCloser interface {
 type ClientSnapshot struct {
 	// Name is the client's stable registered identity.
 	Name string `json:"name"`
+	// Protocol is the client-family category captured during registration.
+	Protocol string `json:"protocol"`
 	// ReadinessPolicy is the policy captured during registration.
 	ReadinessPolicy ReadinessPolicy `json:"readiness_policy"`
 	// Health is the client's effective cached health at snapshot time.

@@ -6,21 +6,22 @@ import (
 )
 
 const (
-	// ProtocolTCP identifies TCP observer events.
+	// ProtocolTCP identifies the TCP client family in registry inspection and
+	// observer events.
 	ProtocolTCP = "tcp"
 	// OperationDial identifies a raw connection-establishment operation.
 	OperationDial = "dial"
 )
 
 func (c *Client) clientObserver() clientkit.Observer {
-	if c == nil || c.Client == nil {
+	if c == nil || c.core == nil {
 		return clientkit.NopObserver{}
 	}
-	return c.Client.Observer()
+	return c.core.Observer()
 }
 
 func (c *Client) telemetryClientName() string {
-	if c == nil || c.Client == nil {
+	if c == nil || c.core == nil {
 		return ""
 	}
 	return c.Name()

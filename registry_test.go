@@ -14,15 +14,19 @@ import (
 )
 
 type registryClient struct {
-	name         string
-	policy       clientkit.ReadinessPolicy
-	health       clientkit.Health
-	namePanics   bool
-	policyPanics bool
-	healthPanics bool
-	nameCalls    int
-	policyCalls  int
-	healthCalls  int
+	name           string
+	protocol       string
+	policy         clientkit.ReadinessPolicy
+	health         clientkit.Health
+	namePanics     bool
+	protocolPanics bool
+	protocolEmpty  bool
+	policyPanics   bool
+	healthPanics   bool
+	nameCalls      int
+	protocolCalls  int
+	policyCalls    int
+	healthCalls    int
 }
 
 func (c *registryClient) Name() string {
@@ -31,6 +35,20 @@ func (c *registryClient) Name() string {
 		panic("name panic")
 	}
 	return c.name
+}
+
+func (c *registryClient) Protocol() string {
+	c.protocolCalls++
+	if c.protocolPanics {
+		panic("protocol panic")
+	}
+	if c.protocolEmpty {
+		return ""
+	}
+	if c.protocol == "" {
+		return "test"
+	}
+	return c.protocol
 }
 
 func (c *registryClient) ReadinessPolicy() clientkit.ReadinessPolicy {
@@ -258,6 +276,9 @@ func TestRegistryRegisterValidation(t *testing.T) {
 	}{
 		{name: "invalid name", client: valid("invalid/name"), wantErr: "invalid client name"},
 		{name: "name panic", client: &registryClient{namePanics: true}, wantErr: "client name panicked"},
+		{name: "missing protocol", client: &registryClient{name: "client", protocolEmpty: true}, wantErr: "protocol is required"},
+		{name: "invalid protocol", client: &registryClient{name: "client", protocol: "HTTP/API"}, wantErr: "invalid protocol"},
+		{name: "protocol panic", client: &registryClient{name: "client", protocolPanics: true}, wantErr: "client protocol panicked"},
 		{name: "invalid readiness policy", client: &registryClient{name: "client", policy: "invalid"}, wantErr: "invalid readiness policy"},
 		{name: "readiness policy panic", client: &registryClient{name: "client", policyPanics: true}, wantErr: "client readiness policy panicked"},
 		{
@@ -355,6 +376,12 @@ func TestRegistryRegisterAllIsAtomic(t *testing.T) {
 			wantErr: "invalid client name",
 			absent:  "gamma",
 		},
+		{
+			name:    "invalid protocol in batch",
+			clients: []clientkit.RegisteredClient{&registryClient{name: "delta"}, &registryClient{name: "epsilon", protocolEmpty: true}},
+			wantErr: "protocol is required",
+			absent:  "delta",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -408,6 +435,9 @@ func TestRegistryConcurrentRegistration(t *testing.T) {
 		if client.Name != wantName {
 			t.Fatalf("Snapshot client %d name = %q, want %q", index, client.Name, wantName)
 		}
+		if client.Protocol != "test" {
+			t.Fatalf("Snapshot client %d protocol = %q, want test", index, client.Protocol)
+		}
 		if got, ok := registry.Get(wantName); !ok || got == nil {
 			t.Fatalf("Get(%q) = (%v, %t), want registered client", wantName, got, ok)
 		}
@@ -417,18 +447,20 @@ func TestRegistryConcurrentRegistration(t *testing.T) {
 func TestRegistryCapturesRegistrationMetadata(t *testing.T) {
 	registry := clientkit.NewRegistry()
 	client := &registryClient{
-		name:   "payments",
-		policy: clientkit.ReadinessRequired,
-		health: clientkit.Health{State: clientkit.HealthHealthy, Message: "initial"},
+		name:     "payments",
+		protocol: "http",
+		policy:   clientkit.ReadinessRequired,
+		health:   clientkit.Health{State: clientkit.HealthHealthy, Message: "initial"},
 	}
 	if err := registry.Register(client); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	if client.nameCalls != 1 || client.policyCalls != 1 {
-		t.Fatalf("registration calls = (name %d, policy %d), want (1, 1)", client.nameCalls, client.policyCalls)
+	if client.nameCalls != 1 || client.protocolCalls != 1 || client.policyCalls != 1 {
+		t.Fatalf("registration calls = (name %d, protocol %d, policy %d), want (1, 1, 1)", client.nameCalls, client.protocolCalls, client.policyCalls)
 	}
 
 	client.name = "changed"
+	client.protocol = "tcp"
 	client.policy = clientkit.ReadinessOptional
 	client.health = clientkit.Health{State: clientkit.HealthDegraded, Message: "current"}
 
@@ -445,14 +477,14 @@ func TestRegistryCapturesRegistrationMetadata(t *testing.T) {
 		t.Fatalf("Snapshot contains %d clients, want 1", len(snapshot.Clients))
 	}
 	entry := snapshot.Clients[0]
-	if entry.Name != "payments" || entry.ReadinessPolicy != clientkit.ReadinessRequired {
-		t.Fatalf("captured metadata = (%q, %q), want (%q, %q)", entry.Name, entry.ReadinessPolicy, "payments", clientkit.ReadinessRequired)
+	if entry.Name != "payments" || entry.Protocol != "http" || entry.ReadinessPolicy != clientkit.ReadinessRequired {
+		t.Fatalf("captured metadata = (%q, %q, %q), want (%q, %q, %q)", entry.Name, entry.Protocol, entry.ReadinessPolicy, "payments", "http", clientkit.ReadinessRequired)
 	}
 	if entry.Health.State != clientkit.HealthDegraded || entry.Health.Message != "current" {
 		t.Fatalf("Snapshot health = %#v, want current passive health", entry.Health)
 	}
-	if client.nameCalls != 1 || client.policyCalls != 1 || client.healthCalls != 1 {
-		t.Fatalf("calls after Snapshot = (name %d, policy %d, health %d), want (1, 1, 1)", client.nameCalls, client.policyCalls, client.healthCalls)
+	if client.nameCalls != 1 || client.protocolCalls != 1 || client.policyCalls != 1 || client.healthCalls != 1 {
+		t.Fatalf("calls after Snapshot = (name %d, protocol %d, policy %d, health %d), want (1, 1, 1, 1)", client.nameCalls, client.protocolCalls, client.policyCalls, client.healthCalls)
 	}
 }
 

@@ -34,10 +34,9 @@ func TestHTTPExecuteSuccessAndResponseLifecycle(t *testing.T) {
 	if err != nil || response == nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("Do() = (%v, %v), want 200 response", response, err)
 	}
-	select {
-	case event := <-ended:
-		t.Fatalf("operation ended before response body use: %#v", event)
-	default:
+	event := <-ended
+	if !event.Succeeded || event.Outcome != string(httpclient.OutcomeSuccess) || event.FailureClass != clientkit.FailureNone || event.Attempts != 1 {
+		t.Fatalf("operation end = %#v, want one successful header-time completion", event)
 	}
 	content, err := io.ReadAll(response.Body)
 	if err != nil || string(content) != "payload" {
@@ -45,10 +44,6 @@ func TestHTTPExecuteSuccessAndResponseLifecycle(t *testing.T) {
 	}
 	if err := response.Body.Close(); err != nil {
 		t.Fatalf("Body.Close() error = %v", err)
-	}
-	event := <-ended
-	if !event.Succeeded || event.Outcome != string(httpclient.OutcomeSuccess) || event.FailureClass != clientkit.FailureNone || event.Attempts != 1 {
-		t.Fatalf("operation end = %#v, want one successful attempt", event)
 	}
 	select {
 	case duplicate := <-ended:

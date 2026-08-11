@@ -8,8 +8,8 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
-// HeaderPropagator injects context-derived metadata into an attempt-specific
-// outbound header map once per network attempt. Implementations may be called
+// HeaderPropagator injects context-derived metadata into a request-specific
+// outbound header map once per transport RoundTrip. Implementations may be called
 // concurrently, must return quickly, and must not retain or mutate the supplied
 // header after Inject returns. Use Header.Set for single-valued metadata. Header
 // values may contain sensitive data and must never be copied into telemetry
@@ -128,4 +128,20 @@ func restoreHeaders(headers http.Header, backup http.Header) {
 	for key, values := range backup {
 		headers[key] = append([]string(nil), values...)
 	}
+}
+
+type propagatingRoundTripper struct {
+	base       http.RoundTripper
+	propagator HeaderPropagator
+}
+
+func (t *propagatingRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	cloned := request.Clone(request.Context())
+	cloned.Header = request.Header.Clone()
+	SafeHeaderPropagator(t.propagator).Inject(cloned.Context(), cloned.Header)
+	return base.RoundTrip(cloned)
 }

@@ -21,7 +21,7 @@ const (
 	DefaultCheckTimeout = 5 * time.Second
 	// DefaultCheckStaleAfter is the default age after which cached HTTP health is
 	// stale.
-	DefaultCheckStaleAfter = 30 * time.Second
+	DefaultCheckStaleAfter = 90 * time.Second
 	// DefaultCheckStatus is the default exact HTTP health-check status.
 	DefaultCheckStatus = http.StatusOK
 )
@@ -42,7 +42,10 @@ type CheckConfig struct {
 	// DisableTimeout disables the health-check outer timeout.
 	DisableTimeout bool
 
-	// StaleAfter controls when cached check health is projected as unknown.
+	// StaleAfter controls when cached check health is projected as unknown. It
+	// should exceed the maximum expected completion-to-completion refresh gap,
+	// including scheduler wait, check-group execution and queueing, positive
+	// jitter, and scheduler delay.
 	StaleAfter time.Duration
 	// DisableStaleAfter disables cached-health staleness projection.
 	DisableStaleAfter bool
@@ -187,17 +190,17 @@ func normalizeCheckMethod(method string) (string, error) {
 
 // HealthCheckEnabled reports whether active HTTP health checking is enabled.
 func (c *Client) HealthCheckEnabled() bool {
-	return c != nil && c.Client != nil && c.check.enabled
+	return c != nil && c.core != nil && c.check.enabled
 }
 
 // Health returns cached health with read-time staleness projection for enabled
 // checks. It never performs network I/O or mutates cached health.
 func (c *Client) Health() clientkit.Health {
-	if c == nil || c.Client == nil {
+	if c == nil || c.core == nil {
 		return clientkit.Health{State: clientkit.HealthUnknown, Message: "HTTP client health is unavailable"}
 	}
 
-	health := c.Client.Health()
+	health := c.core.Health()
 	if !c.check.enabled {
 		return health
 	}
@@ -209,7 +212,7 @@ func (c *Client) Health() clientkit.Health {
 // mutation, or health telemetry.
 func (c *Client) Check(ctx context.Context) clientkit.Health {
 	startedAt := time.Now()
-	if c == nil || c.Client == nil || c.httpClient == nil || c.baseURL == nil {
+	if c == nil || c.core == nil || c.httpClient == nil || c.baseURL == nil {
 		return c.completeCheckHealth(ctx, clientkit.HealthUnhealthy, clientkit.FailureConfiguration, "HTTP client is not configured", startedAt, 0)
 	}
 	if !c.check.enabled {
@@ -272,7 +275,7 @@ func (c *Client) Check(ctx context.Context) clientkit.Health {
 func (c *Client) completeCheckHealth(ctx context.Context, state clientkit.HealthState, failureClass clientkit.FailureClass, message string, startedAt time.Time, statusCode int) clientkit.Health {
 	var client *clientkit.Client
 	if c != nil {
-		client = c.Client
+		client = c.core
 	}
 	return healthrecord.Record(client, ctx, ProtocolHTTP, clientkit.HealthAssessment{
 		State:        state,

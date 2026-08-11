@@ -21,8 +21,8 @@ func TestTCPDefaults(t *testing.T) {
 	if tcpclient.DefaultCheckTimeout != 5*time.Second {
 		t.Fatalf("DefaultCheckTimeout = %v, want 5s", tcpclient.DefaultCheckTimeout)
 	}
-	if tcpclient.DefaultCheckStaleAfter != 30*time.Second {
-		t.Fatalf("DefaultCheckStaleAfter = %v, want 30s", tcpclient.DefaultCheckStaleAfter)
+	if tcpclient.DefaultCheckStaleAfter != 90*time.Second {
+		t.Fatalf("DefaultCheckStaleAfter = %v, want 90s", tcpclient.DefaultCheckStaleAfter)
 	}
 	if tcpclient.DefaultTLSHandshakeTimeout != 10*time.Second {
 		t.Fatalf("DefaultTLSHandshakeTimeout = %v, want 10s", tcpclient.DefaultTLSHandshakeTimeout)

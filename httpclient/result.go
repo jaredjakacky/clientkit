@@ -23,9 +23,10 @@ const (
 	OutcomeTransportError Outcome = "transport_error"
 )
 
-// Attempt describes one actual HTTP network attempt.
+// Attempt describes one Clientkit HTTP execution attempt. Redirects may cause
+// more than one transport RoundTrip within one execution attempt.
 type Attempt struct {
-	// Number is the one-based network-attempt number.
+	// Number is the one-based execution-attempt number.
 	Number int
 	// Outcome is the bounded result of this attempt.
 	Outcome Outcome
@@ -59,11 +60,9 @@ type Result struct {
 	Response *http.Response
 	// StartedAt is the operation start time.
 	StartedAt time.Time
-	// Duration covers execution through final response headers (or terminal
-	// error). Operation telemetry continues through final response body EOF or
-	// Close so it measures the caller-visible HTTP lifecycle.
+	// Duration covers execution through final response headers or terminal error.
 	Duration time.Duration
-	// Attempts contains one entry for each actual network attempt.
+	// Attempts contains one entry for each Clientkit execution attempt.
 	Attempts []Attempt
 	// Err is the original request or transport execution error.
 	Err error

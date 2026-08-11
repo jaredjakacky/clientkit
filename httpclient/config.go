@@ -17,9 +17,11 @@ type Config struct {
 	BaseURL string
 	// HTTPClient replaces the default net/http client when non-nil. Clientkit
 	// still applies its contexts and request-origin policy and does not mutate or
-	// claim ownership of the supplied client. Client.CloseIdleConnections uses
-	// this client directly; if its transport is shared, that call may affect
-	// other users of the same idle pool.
+	// claim ownership of the supplied client. Its transport is not automatically
+	// instrumented; callers can wrap it explicitly with httpclient/otel when
+	// physical HTTP spans or standard HTTP metrics are wanted.
+	// Client.CloseIdleConnections uses this client directly; if its transport is
+	// shared, that call may affect other users of the same idle pool.
 	HTTPClient *http.Client
 	// Propagator completely replaces the default OpenTelemetry trace propagator
 	// when non-nil. Use NopHeaderPropagator to disable propagation or
@@ -37,13 +39,16 @@ type Config struct {
 	// 2xx responses through DefaultResponseClassifier. Health checks do not use
 	// this policy.
 	ResponseClassifier ResponseClassifier
-	// Timeout bounds the complete logical operation, including retries, retry
-	// delays, and final response-body use. Zero selects DefaultTimeout.
+	// Timeout bounds request execution, including retries and retry delays, and
+	// remains active for final response-body use. Logical observation and Result
+	// duration stop at final response headers or a terminal error. Zero selects
+	// DefaultTimeout.
 	Timeout time.Duration
 	// DisableTimeout intentionally disables Clientkit's total execution timeout.
 	DisableTimeout bool
-	// AttemptTimeout bounds each individual network attempt, including final
-	// response-body use. Zero selects DefaultAttemptTimeout.
+	// AttemptTimeout bounds each Clientkit execution attempt and remains active
+	// for final response-body use. One execution attempt may contain multiple
+	// RoundTrips because of redirects. Zero selects DefaultAttemptTimeout.
 	AttemptTimeout time.Duration
 	// DisableAttemptTimeout intentionally disables Clientkit's per-attempt timeout.
 	DisableAttemptTimeout bool

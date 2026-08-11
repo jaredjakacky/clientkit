@@ -26,7 +26,7 @@ func TestOperationSpanLifecycleAndAttributePrecedence(t *testing.T) {
 		attribute.String(clientkitotel.AttributeFailureClass, "common-failure"),
 		attribute.String(" ", "blank"),
 	}
-	option := clientkitotel.WithAttributes(common...)
+	option := clientkitotel.WithSpanAttributes(common...)
 	common[0] = attribute.String("component", "mutated")
 	observer, err := clientkitotel.New(
 		clientkitotel.WithTracerProvider(traces),
@@ -64,8 +64,8 @@ func TestOperationSpanLifecycleAndAttributePrecedence(t *testing.T) {
 		t.Fatalf("started spans = %d, want 1", len(spans))
 	}
 	span := spans[0]
-	if span.Name != "clientkit.http.request" || span.Kind != trace.SpanKindClient || !span.StartedAt.Equal(startedAt) {
-		t.Fatalf("started span = %#v, want named client span with supplied timestamp", span)
+	if span.Name != "clientkit.http.request" || span.Kind != trace.SpanKindInternal || !span.StartedAt.Equal(startedAt) {
+		t.Fatalf("started span = %#v, want named internal span with supplied timestamp", span)
 	}
 	if attributeValue(t, span.Attributes, "component").AsString() != "original" ||
 		attributeValue(t, span.Attributes, "captured").AsString() != "before-start" ||
@@ -104,6 +104,26 @@ func TestOperationSpanLifecycleAndAttributePrecedence(t *testing.T) {
 		!attributeValue(t, span.Attributes, clientkitotel.AttributeSucceeded).AsBool() ||
 		attributeValue(t, span.Attributes, clientkitotel.AttributeOperationAttempts).AsInt64() != 2 {
 		t.Fatalf("end attributes = %#v, want final operation result", span.Attributes)
+	}
+}
+
+func TestOperationKindControlsSpanKind(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		kind clientkit.OperationKind
+		want trace.SpanKind
+	}{
+		{name: "logical", kind: clientkit.OperationKindLogical, want: trace.SpanKindInternal},
+		{name: "remote", kind: clientkit.OperationKindRemote, want: trace.SpanKindClient},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			telemetry := newTelemetryFixture(t)
+			ctx, operation := telemetry.observer.StartOperation(context.Background(), clientkit.OperationStartEvent{Kind: test.kind})
+			operation.End(ctx, clientkit.OperationEndEvent{Succeeded: true})
+			if got := telemetry.traces.spans()[0].Kind; got != test.want {
+				t.Fatalf("span kind = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -228,7 +248,7 @@ func TestAttemptAndRetrySpanEvents(t *testing.T) {
 		Succeeded:    true,
 		FailureClass: clientkit.FailureTransport,
 		Err:          errors.New("attempt detail must not be an exception"),
-		Attributes:   []opskit.Attribute{{Key: "http.method", Value: "GET"}},
+		Attributes:   []opskit.Attribute{{Key: "http.request.method", Value: "GET"}},
 	})
 	telemetry.observer.ObserveRetry(ctx, clientkit.RetryEvent{
 		Client:       "payments",
@@ -263,7 +283,7 @@ func TestAttemptAndRetrySpanEvents(t *testing.T) {
 		attributeValue(t, attempt, clientkitotel.AttributeOutcome).AsString() != "transport_error" ||
 		attributeValue(t, attempt, clientkitotel.AttributeSucceeded).AsBool() ||
 		attributeValue(t, attempt, clientkitotel.AttributeFailureClass).AsString() != string(clientkit.FailureTransport) ||
-		attributeValue(t, attempt, "http.method").AsString() != "GET" {
+		attributeValue(t, attempt, "http.request.method").AsString() != "GET" {
 		t.Fatalf("attempt attributes = %#v, want normalized failure event", attempt)
 	}
 	retry := events[1].Attributes

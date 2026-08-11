@@ -22,7 +22,7 @@ const (
 )
 
 // HeaderValueProvider reads one outbound header value from context. Providers
-// are called once for each actual network attempt and may be called
+// are called once for each transport RoundTrip and may be called
 // concurrently. They must be concurrency-safe, return quickly, avoid indefinite
 // blocking, and not retain the context. Providers should return a stable value
 // already stored in context rather than generating a new identifier per call.
@@ -115,7 +115,7 @@ type contextHeaderPropagator struct {
 
 // NewContextHeaderPropagator validates immutable context-derived header
 // bindings. Existing headers are preserved and values are limited to 256 bytes
-// by default. Providers are invoked independently once per actual attempt;
+// by default. Providers are invoked independently once per RoundTrip;
 // panics and unusable values omit only that binding and never fail the request.
 func NewContextHeaderPropagator(bindings ...ContextHeaderBinding) (HeaderPropagator, error) {
 	if len(bindings) == 0 {

@@ -1,14 +1,17 @@
 // Package clientkit defines the protocol-neutral contracts shared by
 // production-oriented outbound clients.
 //
-// The package provides stable client identity, readiness policy, cached health,
-// failure classification, backend-neutral observation, and registry
-// integration. Protocol packages such as httpclient and tcpclient build on
-// these contracts to perform network operations.
+// The package provides stable client identity, including a bounded protocol
+// category, readiness policy, cached health, failure classification,
+// backend-neutral observation, and registry integration. Protocol packages such
+// as httpclient and tcpclient build on these contracts to perform network
+// operations.
 //
 // Registry status and readiness evaluation are passive: they read cached health
 // and never contact dependencies. Registry.CheckAll is the explicit boundary
-// for active health checks.
+// for active health checks. Registration captures names, protocol categories,
+// and readiness policies once so later inspection does not depend on mutable
+// implementations.
 //
 // A nil Observer passed directly to New becomes a no-op observer. Protocol
 // constructors may install their documented default observer before creating

@@ -14,14 +14,17 @@ import (
 // optional TLS stage. If the function already returns a TLS-secured connection,
 // TLSConfig.Enabled must remain false to avoid wrapping it twice. The function
 // owns socket options such as TCP keepalive. Implementations must be safe for
-// concurrent use and honor context cancellation; Clientkit cannot forcibly stop
-// a function that ignores its context.
+// concurrent use and honor context cancellation. Clientkit cannot forcibly stop
+// a function that ignores its context. Once the function returns, Clientkit
+// rejects the result if its context is done and closes any returned connection.
 type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 
 // ConnectionProbe evaluates protocol-level health over an established
 // connection. Implementations must honor ctx, remain concurrency-safe, and must
 // not retain or close conn. Clientkit applies the context deadline, closes the
-// connection on cancellation, and always closes it after the probe.
+// connection on cancellation, always closes it after the probe, and rejects an
+// assessment returned after the probe context is done. Clientkit cannot forcibly
+// stop a probe that ignores its context.
 type ConnectionProbe interface {
 	Probe(context.Context, net.Conn) clientkit.HealthAssessment
 }
@@ -52,8 +55,10 @@ type Config struct {
 	// receives the trimmed value without further address validation.
 	Address string
 
-	// DialTimeout bounds built-in or custom connection establishment. Zero uses
-	// DefaultDialTimeout.
+	// DialTimeout bounds built-in connection establishment and the acceptance of
+	// a custom DialContext result. A custom function that ignores its context can
+	// delay Dial beyond this duration, but its late result is rejected and any
+	// returned connection is closed. Zero uses DefaultDialTimeout.
 	DialTimeout time.Duration
 	// DisableDialTimeout disables the connection-establishment timeout.
 	DisableDialTimeout bool
@@ -66,8 +71,9 @@ type Config struct {
 	DisableKeepAlive bool
 
 	// DialContext replaces the built-in net.Dialer when non-nil. Clientkit still
-	// supplies Network and Address, applies DialTimeout, and performs its optional
-	// TLS stage. KeepAlive and DisableKeepAlive must remain zero.
+	// supplies Network and Address, applies DialTimeout to the callback context and
+	// accepted result, and performs its optional TLS stage. KeepAlive and
+	// DisableKeepAlive must remain zero.
 	DialContext DialContextFunc
 
 	// Check configures optional connect-and-close health checks.
@@ -81,12 +87,17 @@ type CheckConfig struct {
 	// Enabled allows direct and registry-driven active health checks.
 	Enabled bool
 
-	// Timeout bounds the complete health check, including the optional Probe.
+	// Timeout bounds the accepted result of the complete health check, including
+	// the optional Probe. A probe that ignores its context can delay Check beyond
+	// this duration, but its late assessment is rejected.
 	Timeout time.Duration
 	// DisableTimeout disables the health-check timeout.
 	DisableTimeout bool
 
-	// StaleAfter controls when cached health is projected as unknown.
+	// StaleAfter controls when cached health is projected as unknown. It should
+	// exceed the maximum expected completion-to-completion refresh gap, including
+	// scheduler wait, check-group execution and queueing, positive jitter, and
+	// scheduler delay.
 	StaleAfter time.Duration
 	// DisableStaleAfter disables cached-health staleness projection.
 	DisableStaleAfter bool
@@ -126,7 +137,9 @@ type TLSConfig struct {
 	// supplied through ServerName or Config.ServerName.
 	DisableServerNameInference bool
 
-	// HandshakeTimeout bounds the TLS handshake stage.
+	// HandshakeTimeout bounds the accepted TLS handshake result. A caller-supplied
+	// TLS callback that blocks can delay Dial beyond this duration, but
+	// HandshakeContext returns the winning context error once the callback returns.
 	HandshakeTimeout time.Duration
 	// DisableHandshakeTimeout disables the dedicated TLS handshake timeout.
 	DisableHandshakeTimeout bool

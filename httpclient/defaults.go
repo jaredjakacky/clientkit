@@ -7,10 +7,10 @@ import (
 )
 
 const (
-	// DefaultTimeout limits the complete Clientkit request execution.
+	// DefaultTimeout limits Clientkit request execution and final response-body use.
 	DefaultTimeout = 30 * time.Second
-	// DefaultAttemptTimeout limits one Clientkit request attempt, including final
-	// response-body use.
+	// DefaultAttemptTimeout limits one Clientkit execution attempt and final
+	// response-body use. Redirects can cause multiple RoundTrips in one attempt.
 	DefaultAttemptTimeout = 10 * time.Second
 	// DefaultDialTimeout limits connection establishment.
 	DefaultDialTimeout = 5 * time.Second

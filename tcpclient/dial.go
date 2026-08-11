@@ -20,7 +20,6 @@ var (
 type connectionMetadata struct {
 	tlsVersion         string
 	tlsHandshakeFailed bool
-	contextErr         error
 }
 
 // Dial establishes one configured plaintext or TLS connection using ordinary
@@ -34,7 +33,7 @@ func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 // pass the requested network and address. Clientkit remains endpoint-bound and
 // rejects a target that differs from its immutable configuration.
 func (c *Client) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
-	if c == nil || c.Client == nil {
+	if c == nil || c.core == nil {
 		return nil, errors.New("clientkit: TCP client is not configured")
 	}
 	network = strings.ToLower(strings.TrimSpace(network))
@@ -49,7 +48,7 @@ func (c *Client) DialContext(ctx context.Context, network string, address string
 // Clientkit outcome metadata. A successful Conn is caller-owned.
 func (c *Client) DialResult(ctx context.Context) Result {
 	startedAt := time.Now()
-	if c == nil || c.Client == nil || (c.dialContext == nil && c.dialer == nil) {
+	if c == nil || c.core == nil || (c.dialContext == nil && c.dialer == nil) {
 		return failedDialResult(startedAt, clientkit.FailureConfiguration, errors.New("clientkit: TCP client is not configured"))
 	}
 	if ctx == nil {
@@ -64,6 +63,7 @@ func (c *Client) dialObserved(ctx context.Context) (Result, connectionMetadata) 
 	clientName := c.telemetryClientName()
 	observer := c.clientObserver()
 	operationContext, observation := observer.StartOperation(ctx, clientkit.OperationStartEvent{
+		Kind:       clientkit.OperationKindRemote,
 		Client:     clientName,
 		Protocol:   ProtocolTCP,
 		Operation:  OperationDial,
@@ -140,17 +140,16 @@ func (c *Client) establishConnection(ctx context.Context) (net.Conn, connectionM
 		dialContext, dialCancel = context.WithTimeout(dialContext, c.dialTimeout)
 	}
 	connection, err := c.dialConnection(dialContext)
-	dialContextErr := dialContext.Err()
 	dialCancel()
 	if connection != nil && err != nil {
 		_ = connection.Close()
-		return nil, connectionMetadata{contextErr: dialContextErr}, err
+		return nil, connectionMetadata{}, err
 	}
 	if connection == nil {
 		if err == nil {
 			err = errNoConnection
 		}
-		return nil, connectionMetadata{contextErr: dialContextErr}, err
+		return nil, connectionMetadata{}, err
 	}
 	if !c.tls.enabled {
 		return connection, connectionMetadata{}, nil
@@ -163,13 +162,11 @@ func (c *Client) establishConnection(ctx context.Context) (net.Conn, connectionM
 		handshakeContext, handshakeCancel = context.WithTimeout(handshakeContext, c.tls.handshakeTimeout)
 	}
 	err = secureConnection.HandshakeContext(handshakeContext)
-	handshakeContextErr := handshakeContext.Err()
 	handshakeCancel()
 	if err != nil {
 		_ = connection.Close()
 		return nil, connectionMetadata{
 			tlsHandshakeFailed: true,
-			contextErr:         handshakeContextErr,
 		}, err
 	}
 
@@ -180,7 +177,17 @@ func (c *Client) establishConnection(ctx context.Context) (net.Conn, connectionM
 
 func (c *Client) dialConnection(ctx context.Context) (net.Conn, error) {
 	if c.dialContext != nil {
-		return c.dialContext(ctx, c.network, c.address)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		connection, err := c.dialContext(ctx, c.network, c.address)
+		if contextErr := ctx.Err(); contextErr != nil {
+			if connection != nil {
+				_ = connection.Close()
+			}
+			return nil, contextErr
+		}
+		return connection, err
 	}
 	return c.dialer.DialContext(ctx, c.network, c.address)
 }
@@ -199,12 +206,6 @@ func classifyFailure(connection net.Conn, err error, metadata connectionMetadata
 	if err == nil && connection != nil {
 		return clientkit.FailureNone
 	}
-	if errors.Is(metadata.contextErr, context.Canceled) {
-		return clientkit.FailureCanceled
-	}
-	if errors.Is(metadata.contextErr, context.DeadlineExceeded) {
-		return clientkit.FailureTimeout
-	}
 	if err == nil {
 		return clientkit.FailureTransport
 	}
@@ -214,12 +215,6 @@ func classifyFailure(connection net.Conn, err error, metadata connectionMetadata
 func classifyOutcome(connection net.Conn, err error, metadata connectionMetadata, failureClass clientkit.FailureClass) Outcome {
 	if err == nil && connection != nil {
 		return OutcomeSuccess
-	}
-	if errors.Is(metadata.contextErr, context.Canceled) {
-		return OutcomeCanceled
-	}
-	if errors.Is(metadata.contextErr, context.DeadlineExceeded) {
-		return OutcomeTimeout
 	}
 	if errors.Is(err, context.Canceled) {
 		return OutcomeCanceled

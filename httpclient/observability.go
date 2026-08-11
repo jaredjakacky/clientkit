@@ -7,7 +7,8 @@ import (
 	"github.com/jaredjakacky/opskit"
 )
 
-// ProtocolHTTP identifies HTTP observer events.
+// ProtocolHTTP identifies the HTTP client family in registry inspection and
+// observer events.
 const ProtocolHTTP = "http"
 
 const (
@@ -16,14 +17,14 @@ const (
 )
 
 func (c *Client) clientObserver() clientkit.Observer {
-	if c == nil || c.Client == nil {
+	if c == nil || c.core == nil {
 		return clientkit.NopObserver{}
 	}
-	return c.Client.Observer()
+	return c.core.Observer()
 }
 
 func (c *Client) telemetryClientName() string {
-	if c == nil || c.Client == nil {
+	if c == nil || c.core == nil {
 		return ""
 	}
 	return c.Name()
@@ -46,15 +47,15 @@ func telemetryHTTPMethod(method string) string {
 		http.MethodOptions, http.MethodTrace:
 		return method
 	default:
-		return "OTHER"
+		return "_OTHER"
 	}
 }
 
 func httpExecutionAttributes(method string, statusCode int, additional []opskit.Attribute) []opskit.Attribute {
 	attributes := make([]opskit.Attribute, 0, len(additional)+2)
-	attributes = append(attributes, opskit.Attr("http.method", telemetryHTTPMethod(method)))
+	attributes = append(attributes, opskit.Attr("http.request.method", telemetryHTTPMethod(method)))
 	if statusClass := httpStatusClass(statusCode); statusClass != "" {
-		attributes = append(attributes, opskit.Attr("http.status_class", statusClass))
+		attributes = append(attributes, opskit.Attr("clientkit.http.status_class", statusClass))
 	}
 	attributes = append(attributes, additional...)
 	return attributes

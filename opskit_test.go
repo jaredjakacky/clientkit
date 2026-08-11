@@ -13,10 +13,11 @@ import (
 )
 
 type operationalClient struct {
-	name    string
-	policy  clientkit.ReadinessPolicy
-	enabled bool
-	check   func(context.Context) clientkit.Health
+	name     string
+	protocol string
+	policy   clientkit.ReadinessPolicy
+	enabled  bool
+	check    func(context.Context) clientkit.Health
 
 	mu     sync.RWMutex
 	health clientkit.Health
@@ -24,6 +25,13 @@ type operationalClient struct {
 
 func (c *operationalClient) Name() string {
 	return c.name
+}
+
+func (c *operationalClient) Protocol() string {
+	if c.protocol == "" {
+		return "test"
+	}
+	return c.protocol
 }
 
 func (c *operationalClient) ReadinessPolicy() clientkit.ReadinessPolicy {
@@ -118,37 +126,43 @@ func TestRegistryStatusProjection(t *testing.T) {
 func TestRegistryReadinessProjection(t *testing.T) {
 	registry := clientkit.NewRegistry()
 	clients := []*operationalClient{
-		{name: "degraded", policy: clientkit.ReadinessDegradedAllowed, health: clientkit.Health{State: clientkit.HealthDegraded, Message: "reduced"}, enabled: true},
+		{name: "degraded", protocol: "tcp", policy: clientkit.ReadinessDegradedAllowed, health: clientkit.Health{State: clientkit.HealthDegraded, Message: "reduced"}, enabled: true},
 		{name: "informational", policy: clientkit.ReadinessInformational, health: clientkit.Health{State: clientkit.HealthUnhealthy}},
-		{name: "optional", policy: clientkit.ReadinessOptional, health: clientkit.Health{State: clientkit.HealthUnhealthy, Message: "offline"}},
-		{name: "required", policy: clientkit.ReadinessRequired, health: clientkit.Health{State: clientkit.HealthHealthy}, enabled: true},
+		{name: "optional", protocol: "http", policy: clientkit.ReadinessOptional, health: clientkit.Health{State: clientkit.HealthUnhealthy, Message: "offline"}},
+		{name: "required", protocol: "tcp", policy: clientkit.ReadinessRequired, health: clientkit.Health{State: clientkit.HealthHealthy}, enabled: true},
 	}
 	for _, client := range clients {
 		if err := registry.Register(client); err != nil {
 			t.Fatalf("Register(%q) error = %v", client.name, err)
 		}
 	}
+	for _, client := range clients {
+		client.protocol = "changed"
+	}
 
 	readiness := registry.Readiness(context.Background())
 	if !readiness.Ready {
 		t.Fatalf("Readiness().Ready = false, want true: %#v", readiness)
 	}
-	if len(readiness.Components) != 3 {
-		t.Fatalf("Readiness components = %d, want 3 with informational omitted", len(readiness.Components))
+	if len(readiness.Items) != 3 {
+		t.Fatalf("Readiness items = %d, want 3 with informational omitted", len(readiness.Items))
 	}
 	wantNames := []string{"degraded", "optional", "required"}
-	gotNames := make([]string, 0, len(readiness.Components))
-	for _, component := range readiness.Components {
-		gotNames = append(gotNames, component.Name)
+	gotNames := make([]string, 0, len(readiness.Items))
+	for _, item := range readiness.Items {
+		gotNames = append(gotNames, item.Name)
 	}
 	if !reflect.DeepEqual(gotNames, wantNames) {
-		t.Fatalf("Readiness component names = %v, want %v", gotNames, wantNames)
+		t.Fatalf("Readiness item names = %v, want %v", gotNames, wantNames)
 	}
-	if !readiness.Components[0].Ready || readiness.Components[0].State != opskit.StateDegraded || readiness.Components[0].Policy != opskit.ReadinessRequired {
-		t.Fatalf("degraded component = %#v, want satisfied blocking component", readiness.Components[0])
+	if !readiness.Items[0].Ready || readiness.Items[0].State != opskit.StateDegraded || readiness.Items[0].Impact != opskit.ReadinessImpactBlocking {
+		t.Fatalf("degraded item = %#v, want satisfied blocking item", readiness.Items[0])
 	}
-	if readiness.Components[1].Ready || readiness.Components[1].Policy != opskit.ReadinessOptional {
-		t.Fatalf("optional component = %#v, want non-blocking unhealthy detail", readiness.Components[1])
+	if readiness.Items[0].Kind != "tcp" || readiness.Items[1].Kind != "http" || readiness.Items[2].Kind != "tcp" {
+		t.Fatalf("readiness kinds = (%q, %q, %q), want captured protocols", readiness.Items[0].Kind, readiness.Items[1].Kind, readiness.Items[2].Kind)
+	}
+	if readiness.Items[1].Ready || readiness.Items[1].Impact != opskit.ReadinessImpactNonBlocking {
+		t.Fatalf("optional item = %#v, want non-blocking unhealthy detail", readiness.Items[1])
 	}
 
 	clients[3].mu.Lock()
@@ -179,9 +193,10 @@ func TestRegistryInspect(t *testing.T) {
 	registry := clientkit.NewRegistry()
 	checkCalls := 0
 	client := &operationalClient{
-		name:    "payments",
-		enabled: true,
-		health:  clientkit.Health{State: clientkit.HealthHealthy},
+		name:     "payments",
+		protocol: "http",
+		enabled:  true,
+		health:   clientkit.Health{State: clientkit.HealthHealthy},
 		check: func(context.Context) clientkit.Health {
 			checkCalls++
 			return clientkit.Health{State: clientkit.HealthHealthy}
@@ -195,7 +210,7 @@ func TestRegistryInspect(t *testing.T) {
 		t.Fatalf("Inspect() error = %v", err)
 	}
 	snapshot, ok := inspection.Details.(clientkit.RegistrySnapshot)
-	if !ok || len(snapshot.Clients) != 1 || snapshot.Clients[0].Name != "payments" {
+	if !ok || len(snapshot.Clients) != 1 || snapshot.Clients[0].Name != "payments" || snapshot.Clients[0].Protocol != "http" {
 		t.Fatalf("Inspect().Details = %#v, want RegistrySnapshot", inspection.Details)
 	}
 	if checkCalls != 0 {
@@ -232,13 +247,13 @@ func TestRegistryCheckAll(t *testing.T) {
 		checkedAt := time.Now().UTC()
 		clients := []*operationalClient{
 			{
-				name: "zulu", policy: clientkit.ReadinessOptional, enabled: true,
+				name: "zulu", protocol: "tcp", policy: clientkit.ReadinessOptional, enabled: true,
 				check: func(context.Context) clientkit.Health {
 					return clientkit.Health{State: clientkit.HealthUnhealthy, FailureClass: clientkit.FailureRemoteResponse, CheckedAt: checkedAt, Message: "offline"}
 				},
 			},
 			{
-				name: "alpha", policy: clientkit.ReadinessRequired, enabled: true,
+				name: "alpha", protocol: "http", policy: clientkit.ReadinessRequired, enabled: true,
 				check: func(context.Context) clientkit.Health {
 					return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: checkedAt, Message: "ready"}
 				},
@@ -249,6 +264,9 @@ func TestRegistryCheckAll(t *testing.T) {
 				t.Fatalf("Register(%q) error = %v", client.name, err)
 			}
 		}
+		for _, client := range clients {
+			client.protocol = "changed"
+		}
 
 		summary := registry.CheckAll(context.Background())
 		if !summary.Ready || summary.State != opskit.StateDegraded {
@@ -256,6 +274,9 @@ func TestRegistryCheckAll(t *testing.T) {
 		}
 		if len(summary.Results) != 2 || summary.Results[0].Name != "alpha" || summary.Results[1].Name != "zulu" {
 			t.Fatalf("CheckAll results = %#v, want alpha then zulu", summary.Results)
+		}
+		if summary.Results[0].Kind != "http" || summary.Results[1].Kind != "tcp" {
+			t.Fatalf("CheckAll result kinds = (%q, %q), want captured protocols", summary.Results[0].Kind, summary.Results[1].Kind)
 		}
 		if summary.Results[1].Result.Ready != true || summary.Results[1].Result.State != opskit.StateDegraded {
 			t.Fatalf("optional unhealthy result = %#v, want ready degraded", summary.Results[1])

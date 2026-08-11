@@ -18,7 +18,7 @@ const (
 	// unknown or unhealthy state.
 	ReadinessDegradedAllowed ReadinessPolicy = "degraded_allowed"
 	// ReadinessInformational keeps client health visible through status, checks,
-	// snapshots, and inspection, but omits the client from readiness components
+	// snapshots, and inspection, but omits the client from readiness items
 	// and aggregate readiness decisions.
 	ReadinessInformational ReadinessPolicy = "informational"
 )

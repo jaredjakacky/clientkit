@@ -50,6 +50,9 @@ func TestHTTPMethodTelemetryUsesBoundedVocabulary(t *testing.T) {
 	if len(observer.attempts) != 2 || len(observer.retries) != 1 {
 		t.Fatalf("observer events = %d attempts and %d retries, want 2 and 1", len(observer.attempts), len(observer.retries))
 	}
+	if observer.start.Kind != clientkit.OperationKindLogical {
+		t.Fatalf("operation kind = %v, want logical", observer.start.Kind)
+	}
 
 	// Every neutral lifecycle event must be safe to forward directly to metrics.
 	attributeSets := [][]opskit.Attribute{observer.start.Attributes, observer.end.Attributes}
@@ -60,8 +63,8 @@ func TestHTTPMethodTelemetryUsesBoundedVocabulary(t *testing.T) {
 		attributeSets = append(attributeSets, retry.Attributes)
 	}
 	for index, attributes := range attributeSets {
-		if got := httpEventAttribute(attributes, "http.method"); got != "OTHER" {
-			t.Errorf("event %d http.method = %q, want OTHER", index, got)
+		if got := httpEventAttribute(attributes, "http.request.method"); got != "_OTHER" {
+			t.Errorf("event %d http.request.method = %q, want _OTHER", index, got)
 		}
 		if httpEventContainsValue(attributes, "PURGE") {
 			t.Errorf("event %d exposed custom method PURGE", index)
@@ -81,8 +84,8 @@ func TestHTTPEmptyMethodUsesGETTelemetryVocabulary(t *testing.T) {
 		t.Fatalf("Execute() = %#v, want successful operation", result)
 	}
 	for index, attributes := range [][]opskit.Attribute{observer.start.Attributes, observer.attempts[0].Attributes, observer.end.Attributes} {
-		if got := httpEventAttribute(attributes, "http.method"); got != http.MethodGet {
-			t.Errorf("event %d http.method = %q, want GET", index, got)
+		if got := httpEventAttribute(attributes, "http.request.method"); got != http.MethodGet {
+			t.Errorf("event %d http.request.method = %q, want GET", index, got)
 		}
 	}
 }
@@ -106,7 +109,7 @@ func TestHTTPStatusTelemetryUsesStatusClasses(t *testing.T) {
 			}, httpclient.Config{Config: clientkit.Config{Name: "status-class", Observer: observer}, Retry: httpclient.NoRetryConfig()})
 			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
 			client.Execute(request)
-			if len(observer.attempts) != 1 || httpEventAttribute(observer.attempts[0].Attributes, "http.status_class") != test.want || httpEventAttribute(observer.end.Attributes, "http.status_class") != test.want {
+			if len(observer.attempts) != 1 || httpEventAttribute(observer.attempts[0].Attributes, "clientkit.http.status_class") != test.want || httpEventAttribute(observer.end.Attributes, "clientkit.http.status_class") != test.want {
 				t.Fatalf("status %d telemetry = (%#v, %#v), want %q", test.statusCode, observer.attempts, observer.end.Attributes, test.want)
 			}
 		})

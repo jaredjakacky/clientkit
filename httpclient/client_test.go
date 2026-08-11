@@ -1,8 +1,10 @@
 package httpclient_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	clientkit "github.com/jaredjakacky/clientkit"
@@ -10,13 +12,38 @@ import (
 )
 
 func TestHTTPClientSnapshotAndHealthCapability(t *testing.T) {
-	client := newHTTPTestClient(t, nil, httpclient.Config{Config: clientkit.Config{Name: "payments"}})
+	const baseURL = "https://private-payments.example.test/api/"
+	client := newHTTPTestClient(t, nil, httpclient.Config{
+		Config:  clientkit.Config{Name: "payments"},
+		BaseURL: baseURL,
+	})
+	if client.Name() != "payments" || client.Protocol() != httpclient.ProtocolHTTP || client.ReadinessPolicy() != clientkit.ReadinessOptional {
+		t.Fatalf("client identity = (%q, %q, %q), want configured values", client.Name(), client.Protocol(), client.ReadinessPolicy())
+	}
 	snapshot := client.Snapshot()
-	if snapshot.Name != "payments" || snapshot.ReadinessPolicy != clientkit.ReadinessOptional || snapshot.Health.State != clientkit.HealthUnknown {
+	if snapshot.Name != "payments" || snapshot.Protocol != httpclient.ProtocolHTTP || snapshot.ReadinessPolicy != clientkit.ReadinessOptional || snapshot.Health.State != clientkit.HealthUnknown {
 		t.Fatalf("Snapshot() = %#v, want configured identity and unknown health", snapshot)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("json.Marshal(Snapshot()) error = %v", err)
+	}
+	if strings.Contains(string(encoded), "private-payments") || strings.Contains(string(encoded), "/api/") {
+		t.Fatalf("Snapshot JSON = %s, want no endpoint configuration", encoded)
 	}
 	if client.HealthCheckEnabled() {
 		t.Fatal("HealthCheckEnabled() = true for zero CheckConfig")
+	}
+}
+
+func TestHTTPClientProtocolIsStableAcrossSchemes(t *testing.T) {
+	for _, baseURL := range []string{"http://example.test", "https://example.test"} {
+		t.Run(baseURL, func(t *testing.T) {
+			client := newHTTPTestClient(t, nil, httpclient.Config{BaseURL: baseURL})
+			if got := client.Protocol(); got != httpclient.ProtocolHTTP {
+				t.Fatalf("Protocol() = %q, want %q", got, httpclient.ProtocolHTTP)
+			}
+		})
 	}
 }
 
@@ -92,13 +119,16 @@ func TestHTTPClientAccessorsAndIdleCleanup(t *testing.T) {
 
 	var nilClient *httpclient.Client
 	nilClient.CloseIdleConnections()
+	if nilClient.Name() != "" || nilClient.Protocol() != "" || nilClient.ReadinessPolicy() != clientkit.ReadinessOptional {
+		t.Fatalf("nil client identity = (%q, %q, %q), want empty name and protocol with optional policy", nilClient.Name(), nilClient.Protocol(), nilClient.ReadinessPolicy())
+	}
 	if _, ok := nilClient.Propagator().(httpclient.NopHeaderPropagator); !ok {
 		t.Fatalf("nil Propagator() = %T, want NopHeaderPropagator", nilClient.Propagator())
 	}
 	if got := nilClient.ResponseClassifier().Classify(&http.Response{StatusCode: http.StatusNoContent}); got != httpclient.ResponseAccepted {
 		t.Fatalf("nil ResponseClassifier() = %q for 204, want accepted", got)
 	}
-	if snapshot := nilClient.Snapshot(); snapshot.Health.State != clientkit.HealthUnknown {
+	if snapshot := nilClient.Snapshot(); snapshot.Protocol != "" || snapshot.ReadinessPolicy != clientkit.ReadinessOptional || snapshot.Health.State != clientkit.HealthUnknown {
 		t.Fatalf("nil Snapshot() = %#v, want unknown health", snapshot)
 	}
 }

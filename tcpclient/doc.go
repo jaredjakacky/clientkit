@@ -13,7 +13,10 @@
 // requires TLS 1.2 or newer. A supplied tls.Config is cloned and treated as a
 // complete policy override; setting InsecureSkipVerify disables standard
 // certificate verification and should be done only deliberately. TCP dialing
-// and TLS handshaking have separate timeout protections.
+// and TLS handshaking have separate timeout protections. TLS handshaking uses
+// tls.Conn.HandshakeContext, so cancellation that wins the handshake is returned
+// as the context error and the underlying connection is closed. A blocking
+// caller-supplied TLS callback can still delay HandshakeContext from returning.
 //
 // A nil Observer selects Clientkit's automatic OpenTelemetry observer, which
 // captures the global providers during Client construction. A non-nil Observer
@@ -25,10 +28,14 @@
 //
 // A custom DialContext replaces only the built-in net.Dialer. Clientkit passes
 // it the normalized network and address, applies the configured dial timeout,
-// and performs the optional TLS stage afterward. The custom function owns socket
-// options, so KeepAlive and DisableKeepAlive cannot be configured with it. It
-// may take complete ownership of TLS by returning an already-secured connection
-// while TLSConfig.Enabled remains false. Clientkit does not detect existing TLS
+// and performs the optional TLS stage afterward. Clientkit cannot forcibly stop
+// a custom function that ignores context cancellation, so such a function can
+// delay Dial beyond the configured timeout. Once it returns, Clientkit checks
+// the callback context, rejects the result if that context is done, and closes
+// any returned connection. The custom function owns socket options, so KeepAlive
+// and DisableKeepAlive cannot be configured with it. It may take complete
+// ownership of TLS by returning an already-secured connection while
+// TLSConfig.Enabled remains false. Clientkit does not detect existing TLS
 // connections and does not implement STARTTLS or apply application-level read or
 // write deadlines. Telemetry labels this opaque security policy as custom rather
 // than assuming the returned connection is plaintext.
@@ -38,10 +45,11 @@
 // Successful plaintext and TLS connections are returned through net.Conn, are
 // caller-owned, and must be closed by the caller. Clientkit does not track or
 // serialize access to them; concurrency guarantees are those of the concrete
-// connection. Clientkit-controlled attributes and operational snapshots exclude
-// server names, addresses, certificates, and raw TLS errors. The default OTel
-// observer also omits raw errors; explicitly enabled error-detail adapters or
-// custom observers may expose them.
+// connection. Plaintext, TLS-wrapped, and custom-dial clients all report the
+// stable protocol category "tcp". Clientkit-controlled attributes and
+// operational snapshots exclude server names, addresses, certificates, and raw
+// TLS errors. The default OTel observer also omits raw errors; explicitly enabled
+// error-detail adapters or custom observers may expose them.
 //
 // # Example
 //

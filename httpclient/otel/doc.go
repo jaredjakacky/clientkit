@@ -1,23 +1,42 @@
-// Package otel adapts OpenTelemetry text-map propagation to Clientkit's HTTP
-// header propagation contract. It injects active context into outbound headers
-// but does not create spans or metrics.
+// Package otel provides Clientkit's OpenTelemetry HTTP propagation and
+// per-RoundTrip transport instrumentation.
 //
-// The package captures the global OpenTelemetry TextMapPropagator when New is
-// called by default. Applications should configure the global propagator before
-// construction, or supply an explicit propagator. OpenTelemetry may activate an
-// initially captured delegating no-op when the first global is installed. The
-// application remains responsible for OpenTelemetry SDK lifecycle and global
-// propagator configuration.
+// New constructs only a HeaderPropagator. NewTransport wraps an
+// http.RoundTripper and creates one CLIENT span for each physical RoundTrip,
+// including redirects and Clientkit retries. It injects trace context from that
+// attempt span and ends the span when response headers or a transport error are
+// available; response-body reads and closes do not alter the span.
 //
-// The root Clientkit OpenTelemetry observer creates operation spans and
-// metrics, while this package independently injects their active context:
+// By default the transport omits server address, port, URL, and standard HTTP
+// metrics. WithRequestTargetAttributes explicitly adds server identity and a
+// url.full whose query values are redacted to spans. WithStandardClientMetrics
+// explicitly enables http.client.request.duration and its required
+// server.address and server.port dimensions. Metric attributes are configured
+// independently from span attributes; Clientkit never adds URLs or raw errors
+// to metrics automatically. Callers remain responsible for keeping explicitly
+// supplied metric attributes safe and low-cardinality.
+//
+// Both constructors capture applicable global OpenTelemetry providers or the
+// TextMapPropagator during construction unless explicit options are supplied.
+// Applications should configure globals first and remain responsible for SDK,
+// exporter, provider, and propagator lifecycle.
+//
+// Clientkit automatically installs the logical observer and physical transport
+// instrumentation only when httpclient owns the default HTTP client and
+// Config.Observer is nil. Explicit wiring for a caller-owned HTTP client or a
+// custom observer looks like:
 //
 //	telemetry, err := clientkitotel.New()
 //	if err != nil {
 //		// handle error
 //	}
 //
-//	headers := httpclientotel.New()
+//	attemptTransport, err := httpclientotel.NewTransport(
+//		httpclient.DefaultTransport(),
+//	)
+//	if err != nil {
+//		// handle error
+//	}
 //
 //	client, err := httpclient.New(httpclient.Config{
 //		Config: clientkit.Config{
@@ -25,11 +44,11 @@
 //			Observer: telemetry,
 //		},
 //		BaseURL:   "https://payments.internal",
-//		Propagator: headers,
+//		HTTPClient: &http.Client{Transport: attemptTransport},
 //	})
 //
-// Non-nil observers and propagators replace the protocol client's automatic
-// defaults, so these explicit adapters are not duplicated. Use
+// Non-nil observers and caller-owned HTTP clients replace the automatic
+// instrumentation boundary, so these explicit adapters are not duplicated. Use
 // clientkit.MultiObserver or httpclient.MultiHeaderPropagator for explicit
 // additive composition. Injected header values may be sensitive and must never
 // be used as telemetry labels.

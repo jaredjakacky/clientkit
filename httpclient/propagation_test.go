@@ -134,6 +134,48 @@ func TestHTTPPropagationRunsPerAttemptWithoutMutatingCallerRequest(t *testing.T)
 	}
 }
 
+func TestHTTPPropagationRunsPerRoundTripAcrossRedirects(t *testing.T) {
+	propagationCalls := 0
+	var wireHeaders []http.Header
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		wireHeaders = append(wireHeaders, request.Header.Clone())
+		if len(wireHeaders) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"/final"}},
+				Body:       http.NoBody,
+				Request:    request,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Header:     make(http.Header),
+			Body:       http.NoBody,
+			Request:    request,
+		}, nil
+	}, httpclient.Config{
+		Propagator: httpclient.HeaderPropagatorFunc(func(_ context.Context, headers http.Header) {
+			propagationCalls++
+			headers.Set("X-Wire-Attempt", strconv.Itoa(propagationCalls))
+		}),
+		Retry: httpclient.NoRetryConfig(),
+	})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
+	result := client.Execute(request)
+	if result.Outcome != httpclient.OutcomeSuccess || result.StatusCode != http.StatusNoContent || len(result.Attempts) != 1 {
+		t.Fatalf("Execute() = %#v, want one logical execution attempt ending in 204", result)
+	}
+	if propagationCalls != 2 || len(wireHeaders) != 2 {
+		t.Fatalf("propagation calls/wire requests = (%d, %d), want (2, 2)", propagationCalls, len(wireHeaders))
+	}
+	if wireHeaders[0].Get("X-Wire-Attempt") != "1" || wireHeaders[1].Get("X-Wire-Attempt") != "2" {
+		t.Fatalf("wire headers = %#v, want fresh injection for redirect resend", wireHeaders)
+	}
+	if request.Header.Get("X-Wire-Attempt") != "" {
+		t.Fatalf("caller request headers = %#v, want unchanged", request.Header)
+	}
+}
+
 type staticTextMapPropagator struct {
 	value string
 }

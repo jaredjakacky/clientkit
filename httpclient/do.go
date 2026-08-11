@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jaredjakacky/clientkit"
+	"github.com/jaredjakacky/clientkit/internal/httpotel"
 	"github.com/jaredjakacky/opskit"
 )
 
@@ -41,7 +42,8 @@ type executionPolicy struct {
 // Do executes request using the client's ordinary policy and returns standard
 // net/http response/error semantics. HTTP status rejection is represented by a
 // non-nil response and nil error. The caller owns any response body and must
-// close it; operation observation completes at body EOF or Close.
+// close it; operation observation completes when final response headers or a
+// terminal execution error are available.
 func (c *Client) Do(request *http.Request) (*http.Response, error) {
 	result := c.Execute(request)
 	return result.Response, result.Err
@@ -60,7 +62,7 @@ func (c *Client) Execute(request *http.Request) Result {
 // RetrySafetyNever disables retries for this call. Result.Err remains reserved
 // for request and transport execution errors, and the caller owns any final
 // response body. ExecuteWithOptions takes ownership of a non-nil request body
-// and closes it even when validation prevents the first network attempt.
+// and closes it even when validation prevents the first execution attempt.
 func (c *Client) ExecuteWithOptions(request *http.Request, options DoOptions) Result {
 	classifier := normalizeResponseClassifier(nil)
 	if c != nil {
@@ -178,14 +180,15 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 	clientName := c.telemetryClientName()
 	observer := c.clientObserver()
 	operationContext, operationObservation := observer.StartOperation(request.Context(), clientkit.OperationStartEvent{
+		Kind:       clientkit.OperationKindLogical,
 		Client:     clientName,
 		Protocol:   ProtocolHTTP,
 		Operation:  policy.operation,
 		StartedAt:  operationStartedAt.UTC(),
 		Attributes: httpExecutionAttributes(method, 0, policy.attributes),
 	})
+	operationContext = httpotel.WithOperation(operationContext, clientName, policy.operation)
 	request = request.Clone(operationContext)
-	finishOnReturn := true
 	finishOperation := func(final Result) {
 		endedAt := time.Now()
 		attributes := httpExecutionAttributes(method, final.StatusCode, policy.attributes)
@@ -204,11 +207,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 			Attributes:   attributes,
 		})
 	}
-	defer func() {
-		if finishOnReturn {
-			finishOperation(result)
-		}
-	}()
+	defer func() { finishOperation(result) }()
 
 	maxAttempts := policy.retry.MaxAttempts
 	if maxAttempts < 1 {
@@ -234,7 +233,6 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 	}
 	attempts := make([]Attempt, 0, attemptCapacity)
 	httpClient := c.executionHTTPClient()
-	propagator := c.Propagator()
 
 	for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
 		if err := totalCtx.Err(); err != nil {
@@ -254,6 +252,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		if policy.attemptTimeout > 0 {
 			attemptCtx, attemptCancel = context.WithTimeout(attemptCtx, policy.attemptTimeout)
 		}
+		attemptCtx = httpotel.WithExecutionAttempt(attemptCtx, attemptNumber)
 
 		attemptRequest, err := requestForAttempt(request, attemptCtx, attemptNumber)
 		if err != nil {
@@ -273,7 +272,6 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		}
 
 		startedAt := time.Now()
-		propagator.Inject(attemptRequest.Context(), attemptRequest.Header)
 		requestAttempted = true
 		response, err := httpClient.Do(attemptRequest)
 		endedAt := time.Now()
@@ -352,22 +350,11 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 				attemptCancel()
 				totalCancel()
 			}
-			observedResult := finalResult
-			observedResult.Response = nil
-			// A returned body extends the operation lifecycle beyond response headers.
-			// Completion and Clientkit-owned contexts transfer to the body wrapper so
-			// the caller's EOF or Close is represented exactly once.
-			if err == nil && attachResponseLifecycle(response, func(bodyErr error) {
-				defer release()
-				if bodyErr != nil {
-					observedResult.Outcome = classifyOutcome(nil, bodyErr)
-					observedResult.FailureClass = classifyFailure(failureStageTransport, nil, bodyErr)
-					observedResult.Err = bodyErr
-				}
-				finishOperation(observedResult)
-			}) {
+			// Final response-body use remains covered by Clientkit's execution
+			// contexts, but logical observation has already reached its terminal
+			// caller-visible result at response headers.
+			if err == nil && attachResponseLifecycle(response, attemptCtx, release) {
 				cancelTotalOnReturn = false
-				finishOnReturn = false
 			} else {
 				attemptCancel()
 			}
@@ -434,6 +421,12 @@ func (c *Client) executionHTTPClient() *http.Client {
 	// Compose redirect and origin policy on a copy so execution never mutates a
 	// caller-owned http.Client or the Clientkit client's immutable configuration.
 	executionClient := *c.httpClient
+	if !c.transportInjects {
+		executionClient.Transport = &propagatingRoundTripper{
+			base:       executionClient.Transport,
+			propagator: c.Propagator(),
+		}
+	}
 	configuredCheckRedirect := executionClient.CheckRedirect
 
 	executionClient.CheckRedirect = func(request *http.Request, via []*http.Request) error {
@@ -525,39 +518,59 @@ func effectiveURLPort(scheme string, explicitPort string) string {
 type observedResponseBody struct {
 	io.ReadCloser
 	once     sync.Once
-	complete func(error)
+	stopMu   sync.Mutex
+	stop     func() bool
+	finished bool
+	complete func()
 }
 
 func (b *observedResponseBody) Read(buffer []byte) (int, error) {
 	read, err := b.ReadCloser.Read(buffer)
 	if err != nil {
-		if errors.Is(err, io.EOF) {
-			b.finish(nil)
-		} else {
-			b.finish(err)
-		}
+		b.finish()
 	}
 	return read, err
 }
 
 func (b *observedResponseBody) Close() error {
 	err := b.ReadCloser.Close()
-	b.finish(err)
+	b.finish()
 	return err
 }
 
-func (b *observedResponseBody) finish(err error) {
+func (b *observedResponseBody) finish() {
 	b.once.Do(func() {
-		b.complete(err)
+		b.stopMu.Lock()
+		b.finished = true
+		stop := b.stop
+		b.stop = nil
+		b.stopMu.Unlock()
+		if stop != nil {
+			stop()
+		}
+		b.complete()
 	})
 }
 
-func attachResponseLifecycle(response *http.Response, complete func(error)) bool {
+func (b *observedResponseBody) setStop(stop func() bool) {
+	b.stopMu.Lock()
+	if b.finished {
+		b.stopMu.Unlock()
+		stop()
+		return
+	}
+	b.stop = stop
+	b.stopMu.Unlock()
+}
+
+func attachResponseLifecycle(response *http.Response, ctx context.Context, complete func()) bool {
 	if response == nil || response.Body == nil || response.Body == http.NoBody {
 		return false
 	}
 
-	response.Body = &observedResponseBody{ReadCloser: response.Body, complete: complete}
+	wrapper := &observedResponseBody{ReadCloser: response.Body, complete: complete}
+	wrapper.setStop(context.AfterFunc(ctx, wrapper.finish))
+	response.Body = wrapper
 	return true
 }
 

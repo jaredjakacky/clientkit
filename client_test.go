@@ -104,15 +104,7 @@ func TestClientLifecycle(t *testing.T) {
 	if got := client.Health(); got != updated {
 		t.Fatalf("Health() = %#v, want cached %#v", got, updated)
 	}
-	snapshot := client.Snapshot()
-	if snapshot.Name != "payments" || snapshot.ReadinessPolicy != clientkit.ReadinessOptional || snapshot.Health != updated {
-		t.Fatalf("Snapshot() = %#v, want current identity and health", snapshot)
-	}
-	// A snapshot represents one instant and must not follow later cache updates.
 	client.UpdateHealth(clientkit.Health{State: clientkit.HealthUnhealthy, Message: "offline"})
-	if snapshot.Health != updated {
-		t.Fatalf("earlier snapshot health = %#v after update, want %#v", snapshot.Health, updated)
-	}
 
 	operationCtx := context.Background()
 	ctx, observation := client.Observer().StartOperation(operationCtx, clientkit.OperationStartEvent{})
@@ -225,7 +217,6 @@ func TestClientHealthIsSafeForConcurrentUse(t *testing.T) {
 		go func() {
 			defer group.Done()
 			_ = client.Health()
-			_ = client.Snapshot()
 		}()
 	}
 	group.Wait()

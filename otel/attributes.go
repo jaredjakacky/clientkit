@@ -20,7 +20,7 @@ const (
 	AttributeOutcome = "clientkit.outcome"
 	// AttributeSucceeded records the adapter-normalized success decision.
 	AttributeSucceeded = "clientkit.succeeded"
-	// AttributeOperationAttempts records actual attempts in an operation.
+	// AttributeOperationAttempts records Clientkit execution attempts in an operation.
 	AttributeOperationAttempts = "clientkit.operation.attempts"
 	// AttributeAttemptNumber records a one-based attempt number.
 	AttributeAttemptNumber = "clientkit.attempt.number"

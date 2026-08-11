@@ -29,8 +29,24 @@ type OperationObservation interface {
 	End(context.Context, OperationEndEvent)
 }
 
-// OperationStartEvent describes the beginning of a client operation.
+// OperationKind describes whether an observed operation coordinates logical
+// client policy or directly represents one remote interaction.
+type OperationKind uint8
+
+const (
+	// OperationKindLogical identifies an operation that may coordinate retries,
+	// backoff, classification, or multiple remote interactions.
+	OperationKindLogical OperationKind = iota
+	// OperationKindRemote identifies an operation that directly represents one
+	// remote interaction.
+	OperationKindRemote
+)
+
+// OperationStartEvent describes the beginning of a client operation. The zero
+// Kind is OperationKindLogical for compatibility with ordinary event literals.
 type OperationStartEvent struct {
+	// Kind identifies the operation boundary for tracing adapters.
+	Kind OperationKind
 	// Client is the stable configured client name.
 	Client string
 	// Protocol identifies the client protocol.

@@ -16,10 +16,12 @@
 //
 //	import (
 //		"log/slog"
+//		"net/http"
 //		"os"
 //
 //		clientkit "github.com/jaredjakacky/clientkit"
 //		httpclient "github.com/jaredjakacky/clientkit/httpclient"
+//		httpclientotel "github.com/jaredjakacky/clientkit/httpclient/otel"
 //		clientkitotel "github.com/jaredjakacky/clientkit/otel"
 //		slogobserver "github.com/jaredjakacky/clientkit/slogobserver"
 //	)
@@ -44,6 +46,13 @@
 //		// handle error
 //	}
 //
+//	attemptTransport, err := httpclientotel.NewTransport(
+//		httpclient.DefaultTransport(),
+//	)
+//	if err != nil {
+//		// handle error
+//	}
+//
 //	client, err := httpclient.New(httpclient.Config{
 //		Config: clientkit.Config{
 //			Name:     "payments",
@@ -52,6 +61,7 @@
 //				telemetry,
 //			),
 //		},
-//		BaseURL: "https://payments.internal",
+//		BaseURL:   "https://payments.internal",
+//		HTTPClient: &http.Client{Transport: attemptTransport},
 //	})
 package slogobserver
