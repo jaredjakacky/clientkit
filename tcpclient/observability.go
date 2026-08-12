@@ -28,13 +28,13 @@ func (c *Client) telemetryClientName() string {
 }
 
 func telemetryNetwork(network string) string {
-	// Dialing retains the configured network; telemetry exposes only the bounded
-	// built-in vocabulary plus one value for custom dialers.
+	// Construction restricts configured clients to this bounded vocabulary. The
+	// fallback keeps telemetry bounded for an unavailable receiver.
 	switch network {
 	case "tcp", "tcp4", "tcp6":
 		return network
 	default:
-		return "custom"
+		return "unknown"
 	}
 }
 

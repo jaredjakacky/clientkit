@@ -61,7 +61,11 @@ func configuredAddressHost(address string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(host)
+	host = strings.TrimSpace(host)
+	if zone := strings.LastIndexByte(host, '%'); zone > 0 && net.ParseIP(host[:zone]) != nil {
+		return host[:zone]
+	}
+	return host
 }
 
 func tlsVersionName(version uint16) string {

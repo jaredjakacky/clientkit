@@ -46,6 +46,11 @@ func New(cfg Config) (*Client, error) {
 	if network == "" {
 		network = DefaultNetwork
 	}
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+	default:
+		return nil, errors.New("clientkit: TCP network must be tcp, tcp4, or tcp6")
+	}
 
 	address := strings.TrimSpace(cfg.Address)
 	if address == "" {
@@ -56,11 +61,6 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	if cfg.DialContext == nil {
-		switch network {
-		case "tcp", "tcp4", "tcp6":
-		default:
-			return nil, errors.New("clientkit: TCP network must be tcp, tcp4, or tcp6")
-		}
 		if err := validateTCPAddress(address); err != nil {
 			return nil, err
 		}

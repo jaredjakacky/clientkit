@@ -10,13 +10,15 @@ import (
 )
 
 // DialContextFunc replaces built-in raw connection establishment for a
-// configured network and address. Clientkit still applies its dial timeout and
-// optional TLS stage. If the function already returns a TLS-secured connection,
-// TLSConfig.Enabled must remain false to avoid wrapping it twice. The function
-// owns socket options such as TCP keepalive. Implementations must be safe for
-// concurrent use and honor context cancellation. Clientkit cannot forcibly stop
-// a function that ignores its context. Once the function returns, Clientkit
-// rejects the result if its context is done and closes any returned connection.
+// configured network and address. Implementations are trusted to establish a
+// TCP byte stream for that endpoint. Clientkit still applies its dial timeout
+// and optional TLS stage. If the function already returns a TLS-secured
+// connection, TLSConfig.Enabled must remain false to avoid wrapping it twice.
+// The function owns socket options such as TCP keepalive. Implementations must
+// be safe for concurrent use and honor context cancellation. Clientkit cannot
+// forcibly stop a function that ignores its context. Once the function returns,
+// Clientkit rejects the result if its context is done and closes any returned
+// connection.
 type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 
 // ConnectionProbe evaluates protocol-level health over an established
@@ -46,9 +48,8 @@ type Config struct {
 	// Config supplies the shared Clientkit identity, readiness, and observer.
 	clientkit.Config
 
-	// Network selects the dialing network. Empty defaults to DefaultNetwork. A
-	// custom DialContext receives the trimmed, lowercased value and may support
-	// values beyond tcp, tcp4, and tcp6.
+	// Network selects tcp, tcp4, or tcp6. Empty defaults to DefaultNetwork. A
+	// custom DialContext receives the trimmed, lowercased value.
 	Network string
 	// Address is the required destination passed to the dialer after trimming.
 	// The built-in dialer requires host:numeric-port form; a custom DialContext

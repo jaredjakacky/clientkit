@@ -216,8 +216,11 @@ func TestTLSDialFailureClassification(t *testing.T) {
 		if len(events.attempts) != 1 || len(events.ends) != 1 {
 			t.Fatalf("observer events = (%d attempts, %d ends), want one each", len(events.attempts), len(events.ends))
 		}
-		if events.attempts[0].Err == nil || events.ends[0].Err == nil || events.attempts[0].Err.Error() != "clientkit: TLS handshake failed" || events.ends[0].Err.Error() != "clientkit: TLS handshake failed" {
-			t.Fatalf("TLS observer errors = (%v, %v), want stable handshake error", events.attempts[0].Err, events.ends[0].Err)
+		for _, observedErr := range []error{events.attempts[0].Err, events.ends[0].Err} {
+			var observedRecordError tls.RecordHeaderError
+			if !errors.As(observedErr, &observedRecordError) {
+				t.Fatalf("TLS observer error = %T %v, want original tls.RecordHeaderError", observedErr, observedErr)
+			}
 		}
 	})
 
@@ -306,6 +309,132 @@ func TestTLSDialFailureClassification(t *testing.T) {
 			t.Fatalf("attempt error = %v, want context.DeadlineExceeded", events.attempts[0].Err)
 		}
 	})
+}
+
+func TestTLSHandshakeNetworkTimeoutPreservesOriginalObserverError(t *testing.T) {
+	tracked, _ := newTrackedPipe(t)
+	wantErr := timeoutError{}
+	connection := &writeErrorConnection{trackedConnection: tracked, err: wantErr}
+	observer := &tcpObserver{}
+	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+		return connection, nil
+	}, func(config *tcpclient.Config) {
+		config.Observer = observer
+		config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{InsecureSkipVerify: true}}
+	})
+
+	result := client.DialResult(context.Background())
+	if result.Outcome != tcpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout || !errors.As(result.Err, new(timeoutError)) {
+		t.Fatalf("DialResult() = %#v, want original TLS network timeout", result)
+	}
+	if !connection.closed.Load() {
+		t.Fatal("TLS network timeout did not close raw connection")
+	}
+	events := observer.snapshot()
+	if len(events.attempts) != 1 || len(events.ends) != 1 {
+		t.Fatalf("observer events = (%d attempts, %d ends), want one each", len(events.attempts), len(events.ends))
+	}
+	for _, observedErr := range []error{events.attempts[0].Err, events.ends[0].Err} {
+		if !errors.As(observedErr, new(timeoutError)) || errors.Is(observedErr, context.DeadlineExceeded) {
+			t.Fatalf("observer error = %T %v, want original non-context timeout", observedErr, observedErr)
+		}
+	}
+}
+
+func TestTLSHandshakePanicClosesRawConnection(t *testing.T) {
+	certificate, roots := testCertificate(t, "example.test")
+	connection, peer := newTrackedPipe(t)
+	serverResults := make(chan error, 1)
+	go func() {
+		server := tls.Server(peer, &tls.Config{Certificates: []tls.Certificate{certificate}})
+		serverResults <- server.Handshake()
+		_ = peer.Close()
+	}()
+	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+		return connection, nil
+	}, func(config *tcpclient.Config) {
+		config.TLS = tcpclient.TLSConfig{
+			Enabled: true,
+			Config: &tls.Config{
+				RootCAs: roots,
+				VerifyConnection: func(tls.ConnectionState) error {
+					panic("verification panic")
+				},
+			},
+		}
+	})
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		client.DialResult(context.Background())
+	}()
+	if recovered != "verification panic" {
+		t.Fatalf("DialResult panic = %#v, want verification panic", recovered)
+	}
+	if !connection.closed.Load() {
+		t.Fatal("TLS verification panic leaked raw connection")
+	}
+	select {
+	case <-serverResults:
+	case <-time.After(time.Second):
+		t.Fatal("TLS server did not unblock after panic cleanup")
+	}
+}
+
+func TestTCPRegistryCheckContainsTLSHandshakePanicWithoutLeakingConnection(t *testing.T) {
+	certificate, roots := testCertificate(t, "example.test")
+	connection, peer := newTrackedPipe(t)
+	serverResults := make(chan error, 1)
+	go func() {
+		server := tls.Server(peer, &tls.Config{Certificates: []tls.Certificate{certificate}})
+		serverResults <- server.Handshake()
+		_ = peer.Close()
+	}()
+	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
+		return connection, nil
+	}, func(config *tcpclient.Config) {
+		config.Check.Enabled = true
+		config.TLS = tcpclient.TLSConfig{
+			Enabled: true,
+			Config: &tls.Config{
+				RootCAs: roots,
+				VerifyConnection: func(tls.ConnectionState) error {
+					panic("verification panic")
+				},
+			},
+		}
+	})
+	registry := clientkit.NewRegistry()
+	registry.MustRegister(client)
+
+	registry.CheckAll(context.Background())
+	if !connection.closed.Load() {
+		t.Fatal("registry-contained TLS verification panic leaked raw connection")
+	}
+	select {
+	case <-serverResults:
+	case <-time.After(time.Second):
+		t.Fatal("TLS server did not unblock after registry-contained panic")
+	}
+}
+
+func TestTLSInfersUnscopedIPv6VerificationName(t *testing.T) {
+	certificate, roots := testCertificate(t, "fe80::1")
+	serverResults := make(chan error, 1)
+	client := newCustomTCPClient(t, tlsPipeDialer(t, &tls.Config{Certificates: []tls.Certificate{certificate}}, serverResults), func(config *tcpclient.Config) {
+		config.Address = "[fe80::1%eth0]:443"
+		config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{RootCAs: roots}}
+	})
+
+	result := client.DialResult(context.Background())
+	if result.Err != nil || result.Outcome != tcpclient.OutcomeSuccess || result.FailureClass != clientkit.FailureNone {
+		t.Fatalf("DialResult() = %#v, want scoped IPv6 TLS success", result)
+	}
+	_ = result.Conn.Close()
+	if err := <-serverResults; err != nil {
+		t.Fatalf("server handshake error = %v", err)
+	}
 }
 
 func TestTLSHandshakeRejectsLateVerificationResults(t *testing.T) {
@@ -481,11 +610,15 @@ func testCertificate(t *testing.T, serverName string) (tls.Certificate, *x509.Ce
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: serverName},
-		DNSNames:     []string{serverName},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if ip := net.ParseIP(serverName); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{serverName}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
 	if err != nil {

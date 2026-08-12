@@ -50,6 +50,11 @@ type deadlineIgnoringConnection struct {
 	*trackedConnection
 }
 
+type writeErrorConnection struct {
+	*trackedConnection
+	err error
+}
+
 type closeSignalingConnection struct {
 	*trackedConnection
 	closedSignal chan struct{}
@@ -57,6 +62,8 @@ type closeSignalingConnection struct {
 }
 
 func (*deadlineIgnoringConnection) SetDeadline(time.Time) error { return nil }
+
+func (c *writeErrorConnection) Write([]byte) (int, error) { return 0, c.err }
 
 func (c *closeSignalingConnection) Close() error {
 	c.closeOnce.Do(func() { close(c.closedSignal) })
@@ -168,6 +175,7 @@ func (timeoutError) Temporary() bool { return true }
 
 var _ net.Conn = (*trackedConnection)(nil)
 var _ net.Conn = (*deadlineIgnoringConnection)(nil)
+var _ net.Conn = (*writeErrorConnection)(nil)
 var _ net.Conn = (*closeSignalingConnection)(nil)
 var _ clientkit.Observer = (*tcpObserver)(nil)
 var _ net.Error = timeoutError{}

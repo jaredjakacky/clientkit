@@ -12,10 +12,7 @@ import (
 	internalfailure "github.com/jaredjakacky/clientkit/internal/failure"
 )
 
-var (
-	errNoConnection         = errors.New("clientkit: TCP dial returned no connection")
-	errObservedTLSHandshake = errors.New("clientkit: TLS handshake failed")
-)
+var errNoConnection = errors.New("clientkit: TCP dial returned no connection")
 
 type connectionMetadata struct {
 	tlsVersion         string
@@ -76,7 +73,6 @@ func (c *Client) dialObserved(ctx context.Context) (Result, connectionMetadata) 
 	attemptEndedAt := time.Now()
 	failureClass := classifyFailure(connection, err, metadata)
 	outcome := classifyOutcome(connection, err, metadata, failureClass)
-	observedErr := observedConnectionError(err, outcome, metadata, failureClass)
 
 	observer.ObserveAttempt(operationContext, clientkit.AttemptEvent{
 		Client:       clientName,
@@ -89,7 +85,7 @@ func (c *Client) dialObserved(ctx context.Context) (Result, connectionMetadata) 
 		Outcome:      string(outcome),
 		Succeeded:    outcome == OutcomeSuccess,
 		FailureClass: failureClass,
-		Err:          observedErr,
+		Err:          err,
 		Attributes:   c.eventAttributes(metadata.tlsVersion),
 	})
 
@@ -113,24 +109,10 @@ func (c *Client) dialObserved(ctx context.Context) (Result, connectionMetadata) 
 		Outcome:      string(result.Outcome),
 		Succeeded:    result.Outcome == OutcomeSuccess,
 		FailureClass: result.FailureClass,
-		Err:          observedErr,
+		Err:          err,
 		Attributes:   c.eventAttributes(metadata.tlsVersion),
 	})
 	return result, metadata
-}
-
-func observedConnectionError(err error, outcome Outcome, metadata connectionMetadata, failureClass clientkit.FailureClass) error {
-	if !metadata.tlsHandshakeFailed && failureClass != clientkit.FailureTLS {
-		return err
-	}
-	switch outcome {
-	case OutcomeCanceled:
-		return context.Canceled
-	case OutcomeTimeout:
-		return context.DeadlineExceeded
-	default:
-		return errObservedTLSHandshake
-	}
 }
 
 func (c *Client) establishConnection(ctx context.Context) (net.Conn, connectionMetadata, error) {
@@ -139,6 +121,7 @@ func (c *Client) establishConnection(ctx context.Context) (net.Conn, connectionM
 	if c.dialTimeout > 0 {
 		dialContext, dialCancel = context.WithTimeout(dialContext, c.dialTimeout)
 	}
+	defer dialCancel()
 	connection, err := c.dialConnection(dialContext)
 	dialCancel()
 	if connection != nil && err != nil {
@@ -155,23 +138,32 @@ func (c *Client) establishConnection(ctx context.Context) (net.Conn, connectionM
 		return connection, connectionMetadata{}, nil
 	}
 
+	connectionOwned := true
+	defer func() {
+		if connectionOwned {
+			_ = connection.Close()
+		}
+	}()
+
 	secureConnection := tls.Client(connection, c.tls.config.Clone())
 	handshakeContext := ctx
 	handshakeCancel := func() {}
 	if c.tls.handshakeTimeout > 0 {
 		handshakeContext, handshakeCancel = context.WithTimeout(handshakeContext, c.tls.handshakeTimeout)
 	}
+	defer handshakeCancel()
 	err = secureConnection.HandshakeContext(handshakeContext)
 	handshakeCancel()
 	if err != nil {
-		_ = connection.Close()
 		return nil, connectionMetadata{
 			tlsHandshakeFailed: true,
 		}, err
 	}
 
+	tlsVersion := tlsVersionName(secureConnection.ConnectionState().Version)
+	connectionOwned = false
 	return secureConnection, connectionMetadata{
-		tlsVersion: tlsVersionName(secureConnection.ConnectionState().Version),
+		tlsVersion: tlsVersion,
 	}, nil
 }
 

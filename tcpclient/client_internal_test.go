@@ -111,7 +111,7 @@ func newTCPHealthProjectionClient(t *testing.T, policy clientkit.ReadinessPolicy
 			ReadinessPolicy: policy,
 			Observer:        clientkit.NopObserver{},
 		},
-		Network:     "custom",
+		Network:     "tcp",
 		Address:     "test-address",
 		DialContext: dial,
 		Check:       check,
