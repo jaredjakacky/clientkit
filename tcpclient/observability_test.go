@@ -24,7 +24,6 @@ func TestTCPNetworkTelemetryUsesBoundedVocabulary(t *testing.T) {
 		{name: "tcp", network: "tcp", want: "tcp"},
 		{name: "tcp4", network: "tcp4", want: "tcp4"},
 		{name: "tcp6", network: "tcp6", want: "tcp6"},
-		{name: "custom", network: "tenant-network-42", want: "custom"},
 	}
 
 	for _, test := range tests {
@@ -57,9 +56,6 @@ func TestTCPNetworkTelemetryUsesBoundedVocabulary(t *testing.T) {
 
 			if got := attributeValue(observer.attempt.Attributes, "clientkit.network"); got != test.want {
 				t.Fatalf("clientkit.network = %q, want %q", got, test.want)
-			}
-			if test.want == "custom" && attributeContainsValue(observer.attempt.Attributes, test.network) {
-				t.Fatalf("attempt attributes exposed custom network %q", test.network)
 			}
 		})
 	}
@@ -110,7 +106,7 @@ func TestTCPDialObserverLifecycle(t *testing.T) {
 	}
 }
 
-func TestCustomDialerTLSFailureUsesBoundedTelemetry(t *testing.T) {
+func TestCustomDialerTLSFailurePreservesOriginalObserverError(t *testing.T) {
 	wantErr := tls.RecordHeaderError{RecordHeader: [5]byte{'s', 'e', 'c', 'r', 't'}}
 	observer := &tcpObserver{}
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
@@ -129,8 +125,9 @@ func TestCustomDialerTLSFailureUsesBoundedTelemetry(t *testing.T) {
 		t.Fatalf("observer events = (%d attempts, %d ends), want one each", len(events.attempts), len(events.ends))
 	}
 	for _, err := range []error{events.attempts[0].Err, events.ends[0].Err} {
-		if err == nil || err.Error() != "clientkit: TLS handshake failed" {
-			t.Fatalf("observer error = %v, want stable TLS failure", err)
+		var observedRecordError tls.RecordHeaderError
+		if !errors.As(err, &observedRecordError) || observedRecordError != wantErr {
+			t.Fatalf("observer error = %T %v, want original TLS failure %v", err, err, wantErr)
 		}
 	}
 	if got := attributeValue(events.starts[0].Attributes, "client.security"); got != "custom" {
@@ -241,13 +238,4 @@ func attributeValue(attributes []opskit.Attribute, key string) string {
 		}
 	}
 	return ""
-}
-
-func attributeContainsValue(attributes []opskit.Attribute, value string) bool {
-	for _, attribute := range attributes {
-		if attribute.Value == value {
-			return true
-		}
-	}
-	return false
 }

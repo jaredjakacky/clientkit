@@ -27,18 +27,19 @@
 // # Custom dialing
 //
 // A custom DialContext replaces only the built-in net.Dialer. Clientkit passes
-// it the normalized network and address, applies the configured dial timeout,
-// and performs the optional TLS stage afterward. Clientkit cannot forcibly stop
-// a custom function that ignores context cancellation, so such a function can
-// delay Dial beyond the configured timeout. Once it returns, Clientkit checks
-// the callback context, rejects the result if that context is done, and closes
-// any returned connection. The custom function owns socket options, so KeepAlive
-// and DisableKeepAlive cannot be configured with it. It may take complete
-// ownership of TLS by returning an already-secured connection while
-// TLSConfig.Enabled remains false. Clientkit does not detect existing TLS
-// connections and does not implement STARTTLS or apply application-level read or
-// write deadlines. Telemetry labels this opaque security policy as custom rather
-// than assuming the returned connection is plaintext.
+// it the normalized tcp, tcp4, or tcp6 network and configured address, applies
+// the configured dial timeout, and performs the optional TLS stage afterward.
+// Clientkit cannot forcibly stop a custom function that ignores context
+// cancellation, so such a function can delay Dial beyond the configured
+// timeout. Once it returns, Clientkit checks the callback context, rejects the
+// result if that context is done, and closes any returned connection. The custom
+// function owns socket options, so KeepAlive and DisableKeepAlive cannot be
+// configured with it. It may take complete ownership of TLS by returning an
+// already-secured connection while TLSConfig.Enabled remains false. Clientkit
+// does not detect existing TLS connections and does not implement STARTTLS or
+// apply application-level read or write deadlines. Telemetry labels this opaque
+// security policy as custom rather than assuming the returned connection is
+// plaintext.
 //
 // # Connection ownership
 //

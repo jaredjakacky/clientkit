@@ -24,7 +24,7 @@ func TestTCPClientConstructionAndNormalization(t *testing.T) {
 		gotDeadline, _ = ctx.Deadline()
 		return connection, nil
 	}, func(config *tcpclient.Config) {
-		config.Network = " CUSTOM-NETWORK "
+		config.Network = " TCP4 "
 		config.Address = " dialer-address "
 		config.ReadinessPolicy = clientkit.ReadinessInformational
 	})
@@ -41,7 +41,7 @@ func TestTCPClientConstructionAndNormalization(t *testing.T) {
 	if result.Err != nil {
 		t.Fatalf("DialResult() error = %v", result.Err)
 	}
-	if gotNetwork != "custom-network" || gotAddress != "dialer-address" {
+	if gotNetwork != "tcp4" || gotAddress != "dialer-address" {
 		t.Fatalf("dial target = (%q, %q), want normalized values", gotNetwork, gotAddress)
 	}
 	earliestDeadline := beforeDial.Add(tcpclient.DefaultDialTimeout)
@@ -115,9 +115,9 @@ func TestTCPClientProtocolIsStableAcrossConfiguration(t *testing.T) {
 			},
 		},
 		{
-			name: "custom dialer and network",
+			name: "custom dialer and tcp6",
 			mutate: func(config *tcpclient.Config) {
-				config.Network = "custom-network"
+				config.Network = "tcp6"
 				config.DialContext = func(context.Context, string, string) (net.Conn, error) {
 					return nil, context.Canceled
 				}

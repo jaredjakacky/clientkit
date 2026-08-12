@@ -55,8 +55,8 @@ func TestNewAcceptsSupportedTCPConfiguration(t *testing.T) {
 		{name: "disabled TLS handshake timeout", mutate: func(config *tcpclient.Config) {
 			config.TLS = tcpclient.TLSConfig{Enabled: true, DisableHandshakeTimeout: true}
 		}},
-		{name: "custom dialer vocabulary", mutate: func(config *tcpclient.Config) {
-			config.Network = " Tenant-Network "
+		{name: "custom dialer tcp6", mutate: func(config *tcpclient.Config) {
+			config.Network = " TCP6 "
 			config.Address = " dialer-owned-address "
 			config.DialContext = func(context.Context, string, string) (net.Conn, error) { return nil, context.Canceled }
 		}},
@@ -87,6 +87,18 @@ func TestNewRejectsInvalidTCPConfiguration(t *testing.T) {
 		{name: "missing address", mutate: func(config *tcpclient.Config) { config.Address = " " }},
 		{name: "URL scheme", mutate: func(config *tcpclient.Config) { config.Address = "tcp://example.test:443" }},
 		{name: "unsupported built-in network", mutate: func(config *tcpclient.Config) { config.Network = "udp" }},
+		{name: "unsupported custom dialer UDP network", mutate: func(config *tcpclient.Config) {
+			config.Network = "udp"
+			config.DialContext = func(context.Context, string, string) (net.Conn, error) { return nil, nil }
+		}},
+		{name: "unsupported custom dialer Unix network", mutate: func(config *tcpclient.Config) {
+			config.Network = "unix"
+			config.DialContext = func(context.Context, string, string) (net.Conn, error) { return nil, nil }
+		}},
+		{name: "unsupported custom dialer network token", mutate: func(config *tcpclient.Config) {
+			config.Network = "tenant-network"
+			config.DialContext = func(context.Context, string, string) (net.Conn, error) { return nil, nil }
+		}},
 		{name: "missing port", mutate: func(config *tcpclient.Config) { config.Address = "example.test" }},
 		{name: "empty port", mutate: func(config *tcpclient.Config) { config.Address = "example.test:" }},
 		{name: "missing host", mutate: func(config *tcpclient.Config) { config.Address = ":443" }},
