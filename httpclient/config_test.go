@@ -2,12 +2,26 @@ package httpclient_test
 
 import (
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
 	clientkit "github.com/jaredjakacky/clientkit"
 	"github.com/jaredjakacky/clientkit/httpclient"
 )
+
+func TestHTTPClientConfigUsesNamedClientkitConfig(t *testing.T) {
+	field, ok := reflect.TypeOf(httpclient.Config{}).FieldByName("Config")
+	if !ok {
+		t.Fatal("Config field is missing")
+	}
+	if field.Anonymous {
+		t.Fatal("Config field is anonymous, want named composition")
+	}
+	if want := reflect.TypeOf(clientkit.Config{}); field.Type != want {
+		t.Fatalf("Config field type = %v, want %v", field.Type, want)
+	}
+}
 
 func TestHTTPClientProductionDefaults(t *testing.T) {
 	client, err := httpclient.New(httpclient.Config{
@@ -38,7 +52,7 @@ func TestHTTPClientConfigValidation(t *testing.T) {
 		name   string
 		mutate func(*httpclient.Config)
 	}{
-		{name: "invalid client name", mutate: func(cfg *httpclient.Config) { cfg.Name = "Payments" }},
+		{name: "invalid client name", mutate: func(cfg *httpclient.Config) { cfg.Config.Name = "Payments" }},
 		{name: "negative timeout", mutate: func(cfg *httpclient.Config) { cfg.Timeout = -time.Second }},
 		{name: "timeout set and disabled", mutate: func(cfg *httpclient.Config) { cfg.Timeout = time.Second; cfg.DisableTimeout = true }},
 		{name: "negative attempt timeout", mutate: func(cfg *httpclient.Config) { cfg.AttemptTimeout = -time.Second }},
@@ -54,7 +68,7 @@ func TestHTTPClientConfigValidation(t *testing.T) {
 		{name: "query", mutate: func(cfg *httpclient.Config) { cfg.BaseURL = "https://example.test/?key=value" }},
 		{name: "empty query", mutate: func(cfg *httpclient.Config) { cfg.BaseURL = "https://example.test/?" }},
 		{name: "invalid retry", mutate: func(cfg *httpclient.Config) { cfg.Retry = httpclient.RetryConfig{MaxAttempts: -1} }},
-		{name: "required without check", mutate: func(cfg *httpclient.Config) { cfg.ReadinessPolicy = clientkit.ReadinessRequired }},
+		{name: "required without check", mutate: func(cfg *httpclient.Config) { cfg.Config.ReadinessPolicy = clientkit.ReadinessRequired }},
 	}
 
 	for _, test := range tests {

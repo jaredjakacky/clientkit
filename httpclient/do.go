@@ -56,18 +56,18 @@ func (c *Client) Do(request *http.Request) (*http.Response, error) {
 // Execute executes request and returns Clientkit's detailed classified result.
 // It is equivalent to ExecuteWithOptions with zero-value options.
 func (c *Client) Execute(request *http.Request) Result {
-	return c.ExecuteWithOptions(request, DoOptions{})
+	return c.ExecuteWithOptions(request, ExecuteOptions{})
 }
 
 // ExecuteWithOptions executes request with explicit per-request policy. A non-nil
 // options classifier completely overrides the client classifier for this call.
 // Accepted responses are never retried; rejected responses may retry under the
 // selected retry policy only when RetrySafety authorizes repetition.
-// RetrySafetyNever disables retries for this call. Result.Err remains reserved
-// for request and transport execution errors, and the caller owns any final
+// RetrySafetyNever disables retries for this call. Result.Err reports setup,
+// request, and transport execution errors, and the caller owns any final
 // response body. ExecuteWithOptions takes ownership of a non-nil request body
 // and closes it even when validation prevents the first execution attempt.
-func (c *Client) ExecuteWithOptions(request *http.Request, options DoOptions) Result {
+func (c *Client) ExecuteWithOptions(request *http.Request, options ExecuteOptions) Result {
 	classifier := normalizeResponseClassifier(nil)
 	if c != nil {
 		classifier = c.responseClassifier
@@ -83,7 +83,7 @@ func (c *Client) ExecuteWithOptions(request *http.Request, options DoOptions) Re
 		operation, err := resolveOperationName(options.Operation)
 		if err != nil {
 			return closeUnattemptedRequestBody(request, Result{
-				Outcome:      OutcomeTransportError,
+				Outcome:      OutcomeExecutionError,
 				FailureClass: clientkit.FailurePolicy,
 				Err:          err,
 			})
@@ -97,7 +97,7 @@ func (c *Client) ExecuteWithOptions(request *http.Request, options DoOptions) Re
 	timeouts, err := resolveExecutionTimeouts(c.timeout, c.attemptTimeout, options.Timeouts)
 	if err != nil {
 		return closeUnattemptedRequestBody(request, Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: clientkit.FailurePolicy,
 			Err:          err,
 		})
@@ -105,7 +105,7 @@ func (c *Client) ExecuteWithOptions(request *http.Request, options DoOptions) Re
 	retry, err := resolveExecutionRetry(c.retry, options.Retry)
 	if err != nil {
 		return closeUnattemptedRequestBody(request, Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: clientkit.FailurePolicy,
 			Err:          err,
 		})
@@ -113,7 +113,7 @@ func (c *Client) ExecuteWithOptions(request *http.Request, options DoOptions) Re
 	operation, err := resolveOperationName(options.Operation)
 	if err != nil {
 		return closeUnattemptedRequestBody(request, Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: clientkit.FailurePolicy,
 			Err:          err,
 		})
@@ -139,21 +139,21 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 
 	if c == nil || c.httpClient == nil || c.baseURL == nil {
 		return Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: classifyFailure(failureStageConfiguration, nil, nil),
 			Err:          errors.New("clientkit: HTTP client is not configured"),
 		}
 	}
 	if request == nil {
 		return Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: classifyFailure(failureStageRequest, nil, nil),
 			Err:          errors.New("clientkit: request is required"),
 		}
 	}
 	if request.URL == nil {
 		return Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: classifyFailure(failureStageRequest, nil, errRequestURLRequired),
 			Err:          errRequestURLRequired,
 		}
@@ -164,7 +164,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 			stage = failureStagePolicy
 		}
 		return Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: classifyFailure(stage, nil, err),
 			Err:          err,
 		}
@@ -174,7 +174,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 	retryAuthorization, err := retryAuthorizationFor(method, policy.retrySafety)
 	if err != nil {
 		return Result{
-			Outcome:      OutcomeTransportError,
+			Outcome:      OutcomeExecutionError,
 			FailureClass: clientkit.FailurePolicy,
 			Err:          err,
 		}
@@ -310,10 +310,10 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 					outcome = OutcomeSuccess
 					failureClass = clientkit.FailureNone
 				case responseClassifiedRejected:
-					outcome = OutcomeHTTPError
+					outcome = OutcomeResponseRejected
 					failureClass = clientkit.FailureRemoteResponse
 				default:
-					outcome = OutcomeHTTPError
+					outcome = OutcomeExecutionError
 					failureClass = clientkit.FailurePolicy
 				}
 			}
@@ -386,7 +386,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		policyDelay := policy.retry.retryDelay(attemptNumber)
 		retryDelay := policyDelay
 		retryDelaySource := "policy"
-		if outcome == OutcomeHTTPError && policy.retry.RespectRetryAfter {
+		if outcome == OutcomeResponseRejected && policy.retry.RespectRetryAfter {
 			if serverDelay, ok := retryAfterDelay(response, endedAt); ok {
 				if serverDelay > policy.retry.MaxRetryAfter {
 					serverDelay = policy.retry.MaxRetryAfter
@@ -430,7 +430,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 	}
 
 	return Result{
-		Outcome:      OutcomeTransportError,
+		Outcome:      OutcomeExecutionError,
 		FailureClass: clientkit.FailureTransport,
 		StartedAt:    operationStartedAt,
 		Duration:     time.Since(operationStartedAt),
@@ -716,7 +716,7 @@ func requestForAttempt(request *http.Request, ctx context.Context, attemptNumber
 
 func classifyOutcome(response *http.Response, err error) Outcome {
 	if isRedirectPolicyFailure(response, err) {
-		return OutcomeTransportError
+		return OutcomeExecutionError
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -731,15 +731,15 @@ func classifyOutcome(response *http.Response, err error) Outcome {
 			return OutcomeTimeout
 		}
 
-		return OutcomeTransportError
+		return OutcomeExecutionError
 	}
 	if response == nil {
-		return OutcomeTransportError
+		return OutcomeExecutionError
 	}
 
 	if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
 		return OutcomeSuccess
 	}
 
-	return OutcomeHTTPError
+	return OutcomeResponseRejected
 }

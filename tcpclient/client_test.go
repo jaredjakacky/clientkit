@@ -26,7 +26,7 @@ func TestTCPClientConstructionAndNormalization(t *testing.T) {
 	}, func(config *tcpclient.Config) {
 		config.Network = " TCP4 "
 		config.Address = " dialer-address "
-		config.ReadinessPolicy = clientkit.ReadinessInformational
+		config.Config.ReadinessPolicy = clientkit.ReadinessInformational
 	})
 
 	if client.Name() != "payments" || client.Protocol() != tcpclient.ProtocolTCP || client.ReadinessPolicy() != clientkit.ReadinessInformational {

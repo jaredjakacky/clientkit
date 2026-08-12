@@ -50,7 +50,7 @@ func TestHTTPRetrySafetyAndReplayability(t *testing.T) {
 		client, attempts := newRetryingClient(t, http.MethodPost)
 		request, _ := http.NewRequest(http.MethodPost, "https://example.test/resource", nil)
 		result := client.Execute(request)
-		if *attempts != 1 || len(result.Attempts) != 1 || result.Outcome != httpclient.OutcomeHTTPError {
+		if *attempts != 1 || len(result.Attempts) != 1 || result.Outcome != httpclient.OutcomeResponseRejected {
 			t.Fatalf("Execute() = %#v with %d calls, want one rejected attempt", result, *attempts)
 		}
 	})
@@ -58,7 +58,7 @@ func TestHTTPRetrySafetyAndReplayability(t *testing.T) {
 	t.Run("explicitly idempotent POST retries", func(t *testing.T) {
 		client, attempts := newRetryingClient(t, http.MethodPost)
 		request, _ := http.NewRequest(http.MethodPost, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{RetrySafety: httpclient.RetrySafetyIdempotent})
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{RetrySafety: httpclient.RetrySafetyIdempotent})
 		if *attempts != 2 || len(result.Attempts) != 2 || result.Outcome != httpclient.OutcomeSuccess {
 			t.Fatalf("ExecuteWithOptions() = %#v with %d calls, want retry success", result, *attempts)
 		}
@@ -67,7 +67,7 @@ func TestHTTPRetrySafetyAndReplayability(t *testing.T) {
 	t.Run("never disables idempotent retry", func(t *testing.T) {
 		client, attempts := newRetryingClient(t, http.MethodPut)
 		request, _ := http.NewRequest(http.MethodPut, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{RetrySafety: httpclient.RetrySafetyNever})
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{RetrySafety: httpclient.RetrySafetyNever})
 		if *attempts != 1 || len(result.Attempts) != 1 {
 			t.Fatalf("ExecuteWithOptions() = %#v with %d calls, want one attempt", result, *attempts)
 		}

@@ -3,12 +3,26 @@ package tcpclient_test
 import (
 	"context"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
 	clientkit "github.com/jaredjakacky/clientkit"
 	"github.com/jaredjakacky/clientkit/tcpclient"
 )
+
+func TestTCPClientConfigUsesNamedClientkitConfig(t *testing.T) {
+	field, ok := reflect.TypeOf(tcpclient.Config{}).FieldByName("Config")
+	if !ok {
+		t.Fatal("Config field is missing")
+	}
+	if field.Anonymous {
+		t.Fatal("Config field is anonymous, want named composition")
+	}
+	if want := reflect.TypeOf(clientkit.Config{}); field.Type != want {
+		t.Fatalf("Config field type = %v, want %v", field.Type, want)
+	}
+}
 
 func TestConnectionProbeFunc(t *testing.T) {
 	want := clientkit.HealthAssessment{State: clientkit.HealthDegraded, Message: "fallback"}
@@ -32,7 +46,7 @@ func TestNewAcceptsSupportedTCPConfiguration(t *testing.T) {
 		mutate func(*tcpclient.Config)
 	}{
 		{name: "default network", mutate: func(*tcpclient.Config) {}},
-		{name: "default observer", mutate: func(config *tcpclient.Config) { config.Observer = nil }},
+		{name: "default observer", mutate: func(config *tcpclient.Config) { config.Config.Observer = nil }},
 		{name: "tcp4", mutate: func(config *tcpclient.Config) { config.Network = " TCP4 " }},
 		{name: "tcp6 IPv6", mutate: func(config *tcpclient.Config) {
 			config.Network = "tcp6"
@@ -83,7 +97,7 @@ func TestNewRejectsInvalidTCPConfiguration(t *testing.T) {
 		name   string
 		mutate func(*tcpclient.Config)
 	}{
-		{name: "invalid client name", mutate: func(config *tcpclient.Config) { config.Name = "Payments" }},
+		{name: "invalid client name", mutate: func(config *tcpclient.Config) { config.Config.Name = "Payments" }},
 		{name: "missing address", mutate: func(config *tcpclient.Config) { config.Address = " " }},
 		{name: "URL scheme", mutate: func(config *tcpclient.Config) { config.Address = "tcp://example.test:443" }},
 		{name: "unsupported built-in network", mutate: func(config *tcpclient.Config) { config.Network = "udp" }},
@@ -147,7 +161,7 @@ func TestNewRejectsInvalidTCPConfiguration(t *testing.T) {
 			config.Check = tcpclient.CheckConfig{Enabled: true, Probe: nilProbe}
 		}},
 		{name: "blocking readiness without check", mutate: func(config *tcpclient.Config) {
-			config.ReadinessPolicy = clientkit.ReadinessRequired
+			config.Config.ReadinessPolicy = clientkit.ReadinessRequired
 		}},
 	}
 

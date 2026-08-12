@@ -32,9 +32,7 @@ func TestPropagatorInjectsConfiguredOpenTelemetryContext(t *testing.T) {
 		TraceState: traceState,
 	}))
 
-	propagator := httpclientotel.New(
-		httpclientotel.WithTextMapPropagator(propagation.TraceContext{}),
-	)
+	propagator := httpclientotel.NewWithTextMapPropagator(propagation.TraceContext{})
 	headers := http.Header{"Existing": []string{"preserved"}}
 	propagator.Inject(ctx, headers)
 
@@ -57,12 +55,8 @@ func TestPropagatorCapturesConfigurationAtConstruction(t *testing.T) {
 
 	globalotel.SetTextMapPropagator(headerTextMapPropagator{value: "global-first"})
 	captured := httpclientotel.New()
-	nilFallback := httpclientotel.New(nil, httpclientotel.WithTextMapPropagator(nil))
-	explicit := httpclientotel.New(
-		httpclientotel.WithTextMapPropagator(headerTextMapPropagator{value: "explicit-first"}),
-		nil,
-		httpclientotel.WithTextMapPropagator(headerTextMapPropagator{value: "explicit-last"}),
-	)
+	nilFallback := httpclientotel.NewWithTextMapPropagator(nil)
+	explicit := httpclientotel.NewWithTextMapPropagator(headerTextMapPropagator{value: "explicit"})
 
 	globalotel.SetTextMapPropagator(headerTextMapPropagator{value: "global-second"})
 	later := httpclientotel.New()
@@ -73,8 +67,8 @@ func TestPropagatorCapturesConfigurationAtConstruction(t *testing.T) {
 		want       string
 	}{
 		{name: "captured global", propagator: captured, want: "global-first"},
-		{name: "nil option falls back to global", propagator: nilFallback, want: "global-first"},
-		{name: "last explicit option wins", propagator: explicit, want: "explicit-last"},
+		{name: "nil propagator falls back to global", propagator: nilFallback, want: "global-first"},
+		{name: "explicit propagator", propagator: explicit, want: "explicit"},
 		{name: "later construction captures replacement", propagator: later, want: "global-second"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -89,7 +83,7 @@ func TestPropagatorCapturesConfigurationAtConstruction(t *testing.T) {
 
 func TestPropagatorHandlesNilInputs(t *testing.T) {
 	recorder := &recordingTextMapPropagator{}
-	propagator := httpclientotel.New(httpclientotel.WithTextMapPropagator(recorder))
+	propagator := httpclientotel.NewWithTextMapPropagator(recorder)
 
 	headers := http.Header{"Existing": []string{"preserved"}}
 	var nilPropagator *httpclientotel.Propagator
@@ -111,9 +105,7 @@ func TestPropagatorHandlesNilInputs(t *testing.T) {
 }
 
 func TestPropagatorSupportsConcurrentInjection(t *testing.T) {
-	propagator := httpclientotel.New(
-		httpclientotel.WithTextMapPropagator(headerTextMapPropagator{value: "concurrent"}),
-	)
+	propagator := httpclientotel.NewWithTextMapPropagator(headerTextMapPropagator{value: "concurrent"})
 
 	const goroutines = 32
 	var waitGroup sync.WaitGroup

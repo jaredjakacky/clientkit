@@ -41,7 +41,7 @@ func TestHTTPMethodTelemetryUsesBoundedVocabulary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http.NewRequest() error = %v", err)
 	}
-	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 		RetrySafety: httpclient.RetrySafetyIdempotent,
 	})
 	if result.Err != nil || result.Outcome != httpclient.OutcomeSuccess || len(result.Attempts) != 2 {

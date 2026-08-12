@@ -59,9 +59,9 @@ func TestHTTPClientOriginPolicy(t *testing.T) {
 		wantOutcome       httpclient.Outcome
 		wantFailure       clientkit.FailureClass
 	}{
-		{name: "cross origin rejected", baseURL: "https://example.test", requestURL: "https://other.test/resource", wantOutcome: httpclient.OutcomeTransportError, wantFailure: clientkit.FailurePolicy},
+		{name: "cross origin rejected", baseURL: "https://example.test", requestURL: "https://other.test/resource", wantOutcome: httpclient.OutcomeExecutionError, wantFailure: clientkit.FailurePolicy},
 		{name: "cross origin allowed", baseURL: "https://example.test", requestURL: "https://other.test/resource", allowCrossOrigin: true, wantCalls: 1, wantOutcome: httpclient.OutcomeSuccess},
-		{name: "host override rejected", baseURL: "https://example.test", requestURL: "https://example.test/resource", host: "override.test", wantOutcome: httpclient.OutcomeTransportError, wantFailure: clientkit.FailurePolicy},
+		{name: "host override rejected", baseURL: "https://example.test", requestURL: "https://example.test/resource", host: "override.test", wantOutcome: httpclient.OutcomeExecutionError, wantFailure: clientkit.FailurePolicy},
 		{name: "host override allowed", baseURL: "https://example.test", requestURL: "https://example.test/resource", host: "override.test", allowHostOverride: true, wantCalls: 1, wantOutcome: httpclient.OutcomeSuccess},
 		{name: "HTTPS default port is same origin", baseURL: "https://example.test", requestURL: "https://example.test:443/resource", wantCalls: 1, wantOutcome: httpclient.OutcomeSuccess},
 		{name: "HTTP default port is same origin", baseURL: "http://example.test", requestURL: "http://example.test:80/resource", wantCalls: 1, wantOutcome: httpclient.OutcomeSuccess},

@@ -13,14 +13,17 @@ type Outcome string
 const (
 	// OutcomeSuccess indicates an accepted response.
 	OutcomeSuccess Outcome = "success"
-	// OutcomeHTTPError indicates a rejected response or response-policy failure.
-	OutcomeHTTPError Outcome = "http_error"
+	// OutcomeResponseRejected indicates that a completed response was rejected
+	// by the configured response classifier.
+	OutcomeResponseRejected Outcome = "response_rejected"
 	// OutcomeTimeout indicates that request execution timed out.
 	OutcomeTimeout Outcome = "timeout"
 	// OutcomeCanceled indicates that request execution was canceled.
 	OutcomeCanceled Outcome = "canceled"
-	// OutcomeTransportError indicates another request-execution failure.
-	OutcomeTransportError Outcome = "transport_error"
+	// OutcomeExecutionError indicates another request-execution failure.
+	// FailureClass identifies whether configuration, request, policy, or
+	// transport behavior caused the failure.
+	OutcomeExecutionError Outcome = "execution_error"
 )
 
 // Attempt describes one Clientkit HTTP execution attempt. Redirects may cause
@@ -44,7 +47,7 @@ type Attempt struct {
 }
 
 // Result describes one completed HTTP operation. A final Response and its body
-// remain caller-owned. Err is reserved for request and transport execution
+// remain caller-owned. Err reports setup, request, and transport execution
 // failures; response rejection and classifier policy failures use Outcome and
 // FailureClass without synthesizing an error.
 type Result struct {
@@ -64,6 +67,7 @@ type Result struct {
 	Duration time.Duration
 	// Attempts contains one entry for each Clientkit execution attempt.
 	Attempts []Attempt
-	// Err is the original request or transport execution error.
+	// Err is the original setup, request, or transport execution error. Response
+	// rejection and classifier policy failures do not synthesize errors.
 	Err error
 }

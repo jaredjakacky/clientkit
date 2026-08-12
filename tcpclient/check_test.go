@@ -42,7 +42,7 @@ func TestTCPCheckSuccessClosesAndCachesConnection(t *testing.T) {
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 		return connection, nil
 	}, func(config *tcpclient.Config) {
-		config.Observer = observer
+		config.Config.Observer = observer
 		config.Check.Enabled = true
 	})
 	if !client.HealthCheckEnabled() {
@@ -244,7 +244,7 @@ func TestTCPCheckRejectsLateProbeAssessments(t *testing.T) {
 			client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 				return connection, nil
 			}, func(config *tcpclient.Config) {
-				config.Observer = observer
+				config.Config.Observer = observer
 				config.Check = tcpclient.CheckConfig{Enabled: true, Probe: probe}
 				if test.useTimeout {
 					config.Check.Timeout = 10 * time.Millisecond

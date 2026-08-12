@@ -46,7 +46,7 @@ func (fn ConnectionProbeFunc) Probe(ctx context.Context, conn net.Conn) clientki
 // Config configures a raw TCP client.
 type Config struct {
 	// Config supplies the shared Clientkit identity, readiness, and observer.
-	clientkit.Config
+	Config clientkit.Config
 
 	// Network selects tcp, tcp4, or tcp6. Empty defaults to DefaultNetwork. A
 	// custom DialContext receives the trimmed, lowercased value.

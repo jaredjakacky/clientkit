@@ -179,7 +179,7 @@ func TestDialRejectsLateCustomDialerResults(t *testing.T) {
 				return connection, test.err
 			}, func(config *tcpclient.Config) {
 				config.DialTimeout = 10 * time.Millisecond
-				config.Observer = observer
+				config.Config.Observer = observer
 			})
 
 			results := make(chan tcpclient.Result, 1)

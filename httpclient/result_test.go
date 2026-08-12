@@ -14,6 +14,24 @@ import (
 	"github.com/jaredjakacky/clientkit/httpclient"
 )
 
+func TestHTTPOutcomeVocabulary(t *testing.T) {
+	tests := []struct {
+		outcome httpclient.Outcome
+		want    string
+	}{
+		{outcome: httpclient.OutcomeSuccess, want: "success"},
+		{outcome: httpclient.OutcomeResponseRejected, want: "response_rejected"},
+		{outcome: httpclient.OutcomeTimeout, want: "timeout"},
+		{outcome: httpclient.OutcomeCanceled, want: "canceled"},
+		{outcome: httpclient.OutcomeExecutionError, want: "execution_error"},
+	}
+	for _, test := range tests {
+		if got := string(test.outcome); got != test.want {
+			t.Errorf("Outcome = %q, want %q", got, test.want)
+		}
+	}
+}
+
 func TestHTTPResultResponseBodyDoesNotChangeCompletedTelemetry(t *testing.T) {
 	t.Run("close without reading preserves success", func(t *testing.T) {
 		ended := make(chan clientkit.OperationEndEvent, 2)
@@ -82,7 +100,7 @@ func TestHTTPResponseBodyHonorsExecutionTimeouts(t *testing.T) {
 	tests := []struct {
 		name       string
 		config     httpclient.Config
-		options    httpclient.DoOptions
+		options    httpclient.ExecuteOptions
 		newContext func(*testing.T) context.Context
 	}{
 		{
@@ -105,7 +123,7 @@ func TestHTTPResponseBodyHonorsExecutionTimeouts(t *testing.T) {
 				Timeout:        time.Second,
 				AttemptTimeout: time.Second,
 			},
-			options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{
+			options: httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{
 				DisableTimeout:        true,
 				DisableAttemptTimeout: true,
 			}},

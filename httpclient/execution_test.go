@@ -59,7 +59,7 @@ func TestHTTPExecuteRejectedResponseUsesStandardSemantics(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
 
 	result := client.Execute(request)
-	if result.Outcome != httpclient.OutcomeHTTPError || result.FailureClass != clientkit.FailureRemoteResponse || result.StatusCode != http.StatusNotFound {
+	if result.Outcome != httpclient.OutcomeResponseRejected || result.FailureClass != clientkit.FailureRemoteResponse || result.StatusCode != http.StatusNotFound {
 		t.Fatalf("Execute() = %#v, want rejected 404", result)
 	}
 	if result.Err != nil || result.Response == nil || len(result.Attempts) != 1 {
@@ -417,7 +417,7 @@ func TestHTTPConfiguredRedirectPolicy(t *testing.T) {
 		})
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
 		result := client.Execute(request)
-		if !errors.Is(result.Err, rejection) || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 1 || calls != 1 {
+		if result.Outcome != httpclient.OutcomeExecutionError || !errors.Is(result.Err, rejection) || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 1 || calls != 1 {
 			t.Fatalf("Execute() = %#v with %d calls, want non-retried redirect policy failure", result, calls)
 		}
 	})
@@ -428,7 +428,7 @@ func TestHTTPConfiguredRedirectPolicy(t *testing.T) {
 		}, httpclient.Config{HTTPClient: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, Retry: httpclient.NoRetryConfig()})
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
 		result := client.Execute(request)
-		if result.Err != nil || result.Response == nil || result.StatusCode != http.StatusFound || result.FailureClass != clientkit.FailureRemoteResponse {
+		if result.Outcome != httpclient.OutcomeResponseRejected || result.Err != nil || result.Response == nil || result.StatusCode != http.StatusFound || result.FailureClass != clientkit.FailureRemoteResponse {
 			t.Fatalf("Execute() = %#v, want rejected redirect response with nil error", result)
 		}
 		_ = result.Response.Body.Close()
@@ -452,22 +452,22 @@ func TestHTTPExecutionPolicyOptionValidation(t *testing.T) {
 	}, httpclient.Config{})
 	tests := []struct {
 		name    string
-		options httpclient.DoOptions
+		options httpclient.ExecuteOptions
 	}{
-		{name: "invalid retry safety", options: httpclient.DoOptions{RetrySafety: "invalid"}},
-		{name: "retry configured and disabled", options: httpclient.DoOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.NoRetryConfig(), Disable: true}}},
-		{name: "invalid retry policy", options: httpclient.DoOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.RetryConfig{MaxAttempts: -1}}}},
-		{name: "negative total timeout", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: -time.Second}}},
-		{name: "total timeout set and disabled", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: time.Second, DisableTimeout: true}}},
-		{name: "negative attempt timeout", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: -time.Second}}},
-		{name: "attempt timeout set and disabled", options: httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: time.Second, DisableAttemptTimeout: true}}},
+		{name: "invalid retry safety", options: httpclient.ExecuteOptions{RetrySafety: "invalid"}},
+		{name: "retry configured and disabled", options: httpclient.ExecuteOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.NoRetryConfig(), Disable: true}}},
+		{name: "invalid retry policy", options: httpclient.ExecuteOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.RetryConfig{MaxAttempts: -1}}}},
+		{name: "negative total timeout", options: httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: -time.Second}}},
+		{name: "total timeout set and disabled", options: httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: time.Second, DisableTimeout: true}}},
+		{name: "negative attempt timeout", options: httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: -time.Second}}},
+		{name: "attempt timeout set and disabled", options: httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: time.Second, DisableAttemptTimeout: true}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			body := &trackedReadCloser{Reader: strings.NewReader("payload")}
 			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", body)
 			result := client.ExecuteWithOptions(request, test.options)
-			if result.Err == nil || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 0 {
+			if result.Outcome != httpclient.OutcomeExecutionError || result.Err == nil || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 0 {
 				t.Fatalf("ExecuteWithOptions() = %#v, want pre-attempt policy failure", result)
 			}
 			if !body.closed {

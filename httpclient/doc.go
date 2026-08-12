@@ -145,7 +145,7 @@
 //		// handle error
 //	}
 //
-//	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		ResponseClassifier: classifier,
 //	})
 //
@@ -157,7 +157,7 @@
 //		operationLookupPayment httpclient.OperationName = "payments.lookup"
 //	)
 //
-//	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		Operation: operationCreatePayment,
 //	})
 //
@@ -176,14 +176,14 @@
 //
 //	request.Header.Set("Idempotency-Key", key)
 //
-//	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		RetrySafety: httpclient.RetrySafetyIdempotent,
 //	})
 //
 // Automatic retries can be disabled for one operation without changing the
 // shared client:
 //
-//	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		Retry: httpclient.ExecutionRetry{
 //			Disable: true,
 //		},
@@ -194,7 +194,7 @@
 //	retry := httpclient.DefaultRetryConfig()
 //	retry.MaxAttempts = 2
 //
-//	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		Retry: httpclient.ExecutionRetry{
 //			Config: retry,
 //		},
@@ -206,7 +206,7 @@
 //	retry.MaxAttempts = 2
 //	retry.Methods = append(retry.Methods, http.MethodPost)
 //
-//	result = client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result = client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		Operation: operationCreatePayment,
 //		Retry: httpclient.ExecutionRetry{
 //			Config: retry,
@@ -220,7 +220,7 @@
 // Total and per-attempt budgets can be shortened independently for one
 // operation without mutating the shared client:
 //
-//	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		Timeouts: httpclient.ExecutionTimeouts{
 //			Timeout:        2 * time.Second,
 //			AttemptTimeout: 750 * time.Millisecond,
@@ -246,7 +246,7 @@
 //		// handle error
 //	}
 //
-//	result := client.ExecuteWithOptions(request, httpclient.DoOptions{
+//	result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{
 //		Timeouts: httpclient.ExecutionTimeouts{
 //			DisableTimeout: true,
 //		},

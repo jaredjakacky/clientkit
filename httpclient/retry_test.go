@@ -85,7 +85,7 @@ func TestHTTPRetriesConfiguredTransportFailures(t *testing.T) {
 		wantOutcome          httpclient.Outcome
 	}{
 		{name: "transport retry", firstErr: errors.New("transport unavailable"), retryTransportErrors: true, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess},
-		{name: "transport disabled", firstErr: errors.New("transport unavailable"), wantAttempts: 1, wantOutcome: httpclient.OutcomeTransportError},
+		{name: "transport disabled", firstErr: errors.New("transport unavailable"), wantAttempts: 1, wantOutcome: httpclient.OutcomeExecutionError},
 		{name: "timeout retry", firstErr: retryTimeoutError{}, retryTimeouts: true, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess},
 		{name: "timeout disabled", firstErr: retryTimeoutError{}, wantAttempts: 1, wantOutcome: httpclient.OutcomeTimeout},
 		{name: "cancellation is never retried", firstErr: context.Canceled, retryTransportErrors: true, retryTimeouts: true, wantAttempts: 1, wantOutcome: httpclient.OutcomeCanceled},
@@ -136,7 +136,7 @@ func TestHTTPResponseRetryRequiresConfiguredMethodAndStatus(t *testing.T) {
 			}})
 			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
 			result := client.Execute(request)
-			if result.Outcome != httpclient.OutcomeHTTPError || calls != 1 || len(result.Attempts) != 1 {
+			if result.Outcome != httpclient.OutcomeResponseRejected || calls != 1 || len(result.Attempts) != 1 {
 				t.Fatalf("Execute() = %#v with %d calls, want non-eligible response without retry", result, calls)
 			}
 		})
@@ -217,7 +217,7 @@ func TestHTTPRetryBackoffIsCapped(t *testing.T) {
 	})
 	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
 	result := client.Execute(request)
-	if result.Outcome != httpclient.OutcomeHTTPError || len(result.Attempts) != 3 {
+	if result.Outcome != httpclient.OutcomeResponseRejected || len(result.Attempts) != 3 {
 		t.Fatalf("Execute() = %#v, want three rejected attempts", result)
 	}
 	retries := observer.snapshot()
