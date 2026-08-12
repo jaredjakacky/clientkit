@@ -6,6 +6,18 @@
   "rangeStrategy": "replace",
   "prConcurrentLimit": 4,
 
+  // config:recommended ignores examples by default, but the composition
+  // example module is part of make verify and must remain dependency-consistent.
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/__tests__/**",
+    "**/test/**",
+    "**/tests/**",
+    "**/__fixtures__/**"
+  ],
+
   // go.dev/dl stable releases are treated as newest-first:
   // [0] = current stable line, [1] = previous stable line
   "customDatasources": {
@@ -88,6 +100,13 @@
       "matchManagers": ["github-actions"],
       "matchDepTypes": ["uses-with"],
       "matchDepNames": ["go"],
+      "enabled": false
+    },
+    {
+      "description": "Keep the composition example on the local Clientkit checkout",
+      "matchManagers": ["gomod"],
+      "matchFileNames": ["examples/kit-series-composition/go.mod"],
+      "matchDepNames": ["github.com/jaredjakacky/clientkit"],
       "enabled": false
     },
     {
