@@ -1,0 +1,197 @@
+name: Release
+run-name: Release ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to release, such as v0.1.0 or v1.0.0-rc.1
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERSION: ${{ inputs.version }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
+          go-version: '1.25.x'
+          check-latest: true
+      - name: Validate version and source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "Releases must be dispatched from $DEFAULT_BRANCH."
+            exit 1
+          fi
+
+          module_path="$(GOWORK=off go list -m -f '{{.Path}}')"
+          GOWORK=off go -C tools/releasecheck run . "$module_path" "$VERSION"
+
+          git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "Release commit $GITHUB_SHA is not reachable from $DEFAULT_BRANCH."
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+            echo "Tag $VERSION already exists."
+            exit 1
+          fi
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "GitHub Release $VERSION already exists."
+            exit 1
+          fi
+
+          echo "Release $VERSION will target $GITHUB_SHA on $DEFAULT_BRANCH."
+
+  verify:
+    name: Verify (Go ${{ matrix.go-version }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          # renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
+          - '1.25.x'
+          # renovate: datasource=custom.go-supported-latest depName=go-latest versioning=semver-coerced
+          - '1.26.x'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+      - name: Run full verification suite
+        run: make verify
+
+  race:
+    name: Race (Go ${{ matrix.go-version }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          # renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
+          - '1.25.x'
+          # renovate: datasource=custom.go-supported-latest depName=go-latest versioning=semver-coerced
+          - '1.26.x'
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+      - name: Run race detector
+        run: make test-race
+
+  govulncheck:
+    name: govulncheck (Go ${{ matrix.go-version }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          # renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
+          - '1.25.x'
+          # renovate: datasource=custom.go-supported-latest depName=go-latest versioning=semver-coerced
+          - '1.26.x'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+      - name: Run govulncheck
+        run: make govulncheck
+
+  publish:
+    name: Publish release
+    needs: [validate, verify, race, govulncheck]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out validated commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Recheck release state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "Release commit $GITHUB_SHA is no longer reachable from $DEFAULT_BRANCH."
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+            echo "Tag $VERSION was created while validation was running."
+            exit 1
+          fi
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "GitHub Release $VERSION was created while validation was running."
+            exit 1
+          fi
+      - name: Create tag and GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          args=("$VERSION" --target "$GITHUB_SHA" --generate-notes --title "$VERSION")
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+
+          gh release create "${args[@]}"
