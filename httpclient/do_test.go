@@ -162,38 +162,42 @@ func TestRetryRejectsInvalidRecreatedBodies(t *testing.T) {
 	}
 }
 
-func TestRetryClosesKnownLargeResponseWithoutDraining(t *testing.T) {
-	intermediateBody := &countingResponseBody{}
-	attempt := 0
-	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
-		attempt++
-		status := http.StatusServiceUnavailable
-		body := io.ReadCloser(intermediateBody)
-		contentLength := int64(1 << 20)
-		if attempt == 2 {
-			status = http.StatusNoContent
-			body = http.NoBody
-			contentLength = 0
-		}
-		return &http.Response{
-			StatusCode:    status,
-			Header:        make(http.Header),
-			Body:          body,
-			ContentLength: contentLength,
-			Request:       request,
-		}, nil
-	}, httpclient.Config{Retry: httpclient.RetryConfig{
-		MaxAttempts: 2,
-		StatusCodes: []int{http.StatusServiceUnavailable},
-		Methods:     []string{http.MethodGet},
-	}})
+func TestRetryClosesIntermediateResponsesWithoutDraining(t *testing.T) {
+	for _, contentLength := range []int64{-1, 0, 1024, 1 << 20} {
+		t.Run(fmt.Sprintf("content-length-%d", contentLength), func(t *testing.T) {
+			intermediateBody := &countingResponseBody{}
+			attempt := 0
+			client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+				attempt++
+				status := http.StatusServiceUnavailable
+				body := io.ReadCloser(intermediateBody)
+				responseLength := contentLength
+				if attempt == 2 {
+					status = http.StatusNoContent
+					body = http.NoBody
+					responseLength = 0
+				}
+				return &http.Response{
+					StatusCode:    status,
+					Header:        make(http.Header),
+					Body:          body,
+					ContentLength: responseLength,
+					Request:       request,
+				}, nil
+			}, httpclient.Config{Retry: httpclient.RetryConfig{
+				MaxAttempts: 2,
+				StatusCodes: []int{http.StatusServiceUnavailable},
+				Methods:     []string{http.MethodGet},
+			}})
 
-	result := client.Execute(mustRequest(t, "https://example.test/resource"))
-	if result.Err != nil || result.Outcome != httpclient.OutcomeSuccess {
-		t.Fatalf("Execute() = %#v, want retry success", result)
-	}
-	if intermediateBody.reads != 0 || !intermediateBody.closed {
-		t.Fatalf("intermediate body reads/closed = %d/%t, want 0/true", intermediateBody.reads, intermediateBody.closed)
+			result := client.Execute(mustRequest(t, "https://example.test/resource"))
+			if result.Err != nil || result.Outcome != httpclient.OutcomeSuccess {
+				t.Fatalf("Execute() = %#v, want retry success", result)
+			}
+			if intermediateBody.reads != 0 || !intermediateBody.closed {
+				t.Fatalf("intermediate body reads/closed = %d/%t, want 0/true", intermediateBody.reads, intermediateBody.closed)
+			}
+		})
 	}
 }
 

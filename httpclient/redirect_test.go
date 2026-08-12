@@ -89,6 +89,22 @@ func TestHTTPDefaultRedirectLimitIsPolicyFailure(t *testing.T) {
 	}
 }
 
+func TestHTTPRedirectRejectsNonHTTPSchemeEvenWhenCrossOriginIsEnabled(t *testing.T) {
+	calls := 0
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		calls++
+		return redirectTo(request, "file://other.test/private"), nil
+	}, httpclient.Config{
+		AllowCrossOrigin: true,
+		Retry:            httpclient.NoRetryConfig(),
+	})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
+	result := client.Execute(request)
+	if result.Response == nil || result.Err == nil || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 1 || calls != 1 {
+		t.Fatalf("Execute() = %#v with %d calls, want rejected redirect before non-HTTP transport", result, calls)
+	}
+}
+
 func redirectTo(request *http.Request, location string) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusFound,

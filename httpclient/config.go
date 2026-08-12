@@ -12,8 +12,9 @@ import (
 type Config struct {
 	// Config supplies shared Clientkit identity, readiness, and observation.
 	clientkit.Config
-	// BaseURL is the required endpoint origin and optional path prefix used by
-	// NewRequest and same-origin execution policy.
+	// BaseURL is the required endpoint origin and optional directory path used as
+	// NewRequest's RFC 3986 resolution base. Root-relative and parent references
+	// may replace or escape that path; it is not a path-confinement boundary.
 	BaseURL string
 	// HTTPClient replaces the default net/http client when non-nil. Clientkit
 	// still applies its contexts and request-origin policy and does not mutate or
@@ -27,9 +28,10 @@ type Config struct {
 	// when non-nil. Use NopHeaderPropagator to disable propagation or
 	// MultiHeaderPropagator to compose propagators explicitly.
 	Propagator HeaderPropagator
-	// AllowCrossOrigin permits requests and redirects whose scheme, host, or port
-	// differ from BaseURL. This can forward caller-supplied headers to another
-	// origin or permit an HTTPS downgrade; the production default rejects it.
+	// AllowCrossOrigin permits HTTP or HTTPS requests and redirects whose scheme,
+	// host, or port differ from BaseURL. This can forward caller-supplied headers
+	// to another origin or permit an HTTPS downgrade; the production default
+	// rejects it. Non-HTTP URL schemes are always rejected.
 	// Pair it with a restrictive CheckRedirect policy when redirects are enabled.
 	AllowCrossOrigin bool
 	// AllowHostOverride permits Request.Host to differ from Request.URL.Host. The

@@ -34,8 +34,10 @@ type HealthChecker interface {
 }
 
 // HealthCheckConfigurable optionally reports whether a registered client's
-// active health check is enabled. HealthChecker implementations that do not
-// implement this interface are treated as enabled.
+// active health check is enabled. Registry captures this immutable configuration
+// once during registration. The method must return quickly without performing
+// I/O. HealthChecker implementations that do not implement this interface are
+// treated as enabled.
 type HealthCheckConfigurable interface {
 	// HealthCheckEnabled reports whether Check is configured for active use.
 	HealthCheckEnabled() bool

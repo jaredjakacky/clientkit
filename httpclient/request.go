@@ -10,8 +10,10 @@ import (
 )
 
 // NewRequest resolves a relative URL reference against the configured BaseURL
-// and returns a request bound to ctx. Absolute references and fragments are
-// rejected so endpoint policy remains explicit.
+// using RFC 3986 semantics and returns a request bound to ctx. Root-relative and
+// parent references may replace or escape the BaseURL path, which is not a
+// confinement boundary. Absolute references and fragments are rejected so
+// endpoint-origin policy remains explicit.
 func (c *Client) NewRequest(ctx context.Context, method string, path string, body io.Reader) (*http.Request, error) {
 	if c == nil || c.baseURL == nil {
 		return nil, errors.New("clientkit: HTTP client is not configured")

@@ -22,6 +22,12 @@
 // Classifier panics and unsupported dispositions become non-retryable policy
 // failures without synthesizing Result.Err.
 //
+// NewRequest resolves references against BaseURL using RFC 3986 semantics.
+// BaseURL paths are directory resolution bases rather than confinement
+// boundaries: root-relative and parent references may replace or escape them.
+// Clientkit still enforces the configured HTTP(S) origin unless cross-origin
+// execution is explicitly enabled.
+//
 // # Observability and readiness
 //
 // With the owned default net/http client and a nil Observer, Clientkit emits one

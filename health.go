@@ -56,8 +56,9 @@ type HealthAssessment struct {
 
 // HealthSanitizer transforms client health before it reaches telemetry,
 // registry checks, readiness, status, or inspection surfaces. Custom
-// implementations must be concurrency-safe and return bounded, non-sensitive
-// output. Clientkit contains sanitizer panics as unknown policy failures.
+// implementations are synchronous: they must be concurrency-safe, return
+// quickly without performing I/O, and produce bounded, non-sensitive output.
+// Clientkit contains sanitizer panics as unknown policy failures.
 type HealthSanitizer func(clientName string, health Health) Health
 
 // DefaultHealthSanitizer enforces valid states, UTC timestamps, non-negative
@@ -128,20 +129,39 @@ func sanitizeHealthSafely(name string, health Health, sanitizer HealthSanitizer,
 }
 
 func boundedHealthMessage(message string) string {
-	message = strings.Map(func(value rune) rune {
-		if unicode.IsControl(value) || unicode.Is(unicode.Cf, value) || unicode.Is(unicode.Zl, value) || unicode.Is(unicode.Zp, value) {
-			return -1
+	if len(message) <= DefaultMaxHealthMessageBytes {
+		message = strings.Map(sanitizeHealthMessageRune, message)
+		for len(message) > DefaultMaxHealthMessageBytes {
+			_, size := utf8.DecodeLastRuneInString(message)
+			if size <= 0 {
+				return ""
+			}
+			message = message[:len(message)-size]
 		}
-		return value
-	}, message)
-	for len(message) > DefaultMaxHealthMessageBytes {
-		_, size := utf8.DecodeLastRuneInString(message)
-		if size <= 0 {
-			return ""
-		}
-		message = message[:len(message)-size]
+		return message
 	}
-	return message
+
+	var bounded strings.Builder
+	bounded.Grow(DefaultMaxHealthMessageBytes)
+	for _, value := range message {
+		value = sanitizeHealthMessageRune(value)
+		if value < 0 {
+			continue
+		}
+		size := utf8.RuneLen(value)
+		if size <= 0 || bounded.Len()+size > DefaultMaxHealthMessageBytes {
+			break
+		}
+		bounded.WriteRune(value)
+	}
+	return bounded.String()
+}
+
+func sanitizeHealthMessageRune(value rune) rune {
+	if unicode.IsControl(value) || unicode.Is(unicode.Cf, value) || unicode.Is(unicode.Zl, value) || unicode.Is(unicode.Zp, value) {
+		return -1
+	}
+	return value
 }
 
 // IsHealthy reports whether the state is exactly HealthHealthy.

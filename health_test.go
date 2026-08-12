@@ -104,12 +104,68 @@ func TestDefaultHealthSanitizer(t *testing.T) {
 		}
 	})
 
+	t.Run("large input is bounded to its safe prefix", func(t *testing.T) {
+		message := strings.Repeat("a", 1<<20)
+		health := clientkit.DefaultHealthSanitizer("payments", clientkit.Health{
+			State:   clientkit.HealthDegraded,
+			Message: message,
+		})
+		want := strings.Repeat("a", clientkit.DefaultMaxHealthMessageBytes)
+		if health.Message != want {
+			t.Fatalf("Message length = %d, want bounded prefix length %d", len(health.Message), len(want))
+		}
+	})
+
+	t.Run("filtered prefix allows later safe content", func(t *testing.T) {
+		message := strings.Repeat("\n", 1<<12) + strings.Repeat("b", clientkit.DefaultMaxHealthMessageBytes+1)
+		health := clientkit.DefaultHealthSanitizer("payments", clientkit.Health{
+			State:   clientkit.HealthDegraded,
+			Message: message,
+		})
+		want := strings.Repeat("b", clientkit.DefaultMaxHealthMessageBytes)
+		if health.Message != want {
+			t.Fatalf("Message = %q, want safe content after filtered prefix", health.Message)
+		}
+	})
+
+	t.Run("large invalid UTF-8 remains valid and bounded", func(t *testing.T) {
+		message := strings.Repeat("\xff", 1<<12)
+		health := clientkit.DefaultHealthSanitizer("payments", clientkit.Health{
+			State:   clientkit.HealthDegraded,
+			Message: message,
+		})
+		if len(health.Message) > clientkit.DefaultMaxHealthMessageBytes || !utf8.ValidString(health.Message) {
+			t.Fatalf("Message is not valid bounded UTF-8: length=%d", len(health.Message))
+		}
+	})
+
+	t.Run("short invalid UTF-8 expansion remains bounded", func(t *testing.T) {
+		message := strings.Repeat("\xff", 100)
+		health := clientkit.DefaultHealthSanitizer("payments", clientkit.Health{
+			State:   clientkit.HealthDegraded,
+			Message: message,
+		})
+		if len(health.Message) > clientkit.DefaultMaxHealthMessageBytes || !utf8.ValidString(health.Message) {
+			t.Fatalf("Message is not valid bounded UTF-8 after expansion: length=%d", len(health.Message))
+		}
+	})
+
 	t.Run("zero completion time remains unset", func(t *testing.T) {
 		health := clientkit.DefaultHealthSanitizer("payments", clientkit.Health{State: clientkit.HealthUnknown})
 		if !health.CheckedAt.IsZero() {
 			t.Fatalf("CheckedAt = %v, want zero time", health.CheckedAt)
 		}
 	})
+}
+
+func BenchmarkDefaultHealthSanitizerLargeMessage(b *testing.B) {
+	message := strings.Repeat("a", 1<<20)
+	health := clientkit.Health{State: clientkit.HealthDegraded, Message: message}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(message)))
+	for b.Loop() {
+		_ = clientkit.DefaultHealthSanitizer("payments", health)
+	}
 }
 
 func TestDefaultHealthSanitizerPreservesSupportedFailureClasses(t *testing.T) {
