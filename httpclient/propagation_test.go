@@ -2,9 +2,12 @@ package httpclient_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	clientkit "github.com/jaredjakacky/clientkit"
@@ -173,6 +176,40 @@ func TestHTTPPropagationRunsPerRoundTripAcrossRedirects(t *testing.T) {
 	}
 	if request.Header.Get("X-Wire-Attempt") != "" {
 		t.Fatalf("caller request headers = %#v, want unchanged", request.Header)
+	}
+}
+
+func TestHTTPPropagationCompletedAfterCancellationDoesNotReachTransport(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	client := newHTTPTestClient(t, func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("transport must not run")
+	}, httpclient.Config{
+		DisableTimeout:        true,
+		DisableAttemptTimeout: true,
+		Propagator: httpclient.HeaderPropagatorFunc(func(_ context.Context, headers http.Header) {
+			close(entered)
+			<-release
+			headers.Set("X-Late", "value")
+		}),
+		Retry: httpclient.NoRetryConfig(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &trackedReadCloser{Reader: strings.NewReader("payload")}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, "https://example.test/resource", io.Reader(body))
+	resultCh := make(chan httpclient.Result, 1)
+	go func() { resultCh <- client.Execute(request) }()
+	<-entered
+	cancel()
+	close(release)
+	result := <-resultCh
+	if result.Response != nil || result.Outcome != httpclient.OutcomeCanceled || result.FailureClass != clientkit.FailureCanceled || !errors.Is(result.Err, context.Canceled) || calls != 0 {
+		t.Fatalf("Execute() = %#v with %d calls, want canceled before transport", result, calls)
+	}
+	if !body.closed {
+		t.Fatal("request body was not closed when propagation lost to cancellation")
 	}
 }
 

@@ -71,6 +71,7 @@ type configurableRegistryChecker struct {
 	*registryClient
 	enabled       bool
 	enabledPanics bool
+	enabledCalls  int
 }
 
 func (c *configurableRegistryChecker) Check(context.Context) clientkit.Health {
@@ -78,6 +79,7 @@ func (c *configurableRegistryChecker) Check(context.Context) clientkit.Health {
 }
 
 func (c *configurableRegistryChecker) HealthCheckEnabled() bool {
+	c.enabledCalls++
 	if c.enabledPanics {
 		panic("enabled panic")
 	}
@@ -294,7 +296,15 @@ func TestRegistryRegisterValidation(t *testing.T) {
 				registryClient: &registryClient{name: "client", policy: clientkit.ReadinessDegradedAllowed},
 				enabledPanics:  true,
 			},
-			wantErr: "requires an enabled health check",
+			wantErr: "health check enablement panicked",
+		},
+		{
+			name: "optional checker enablement panics",
+			client: &configurableRegistryChecker{
+				registryClient: &registryClient{name: "client", policy: clientkit.ReadinessOptional},
+				enabledPanics:  true,
+			},
+			wantErr: "health check enablement panicked",
 		},
 	}
 	for _, test := range tests {
@@ -326,6 +336,56 @@ func TestRegistryRegisterValidation(t *testing.T) {
 		}
 		if err := registry.Register(checker); err != nil {
 			t.Fatalf("Register() error = %v", err)
+		}
+		if checker.enabledCalls != 1 {
+			t.Fatalf("HealthCheckEnabled() calls = %d, want 1", checker.enabledCalls)
+		}
+	})
+
+	t.Run("checker enablement is captured once", func(t *testing.T) {
+		registry := clientkit.NewRegistry()
+		checker := &configurableRegistryChecker{
+			registryClient: &registryClient{
+				name:   "optional-client",
+				policy: clientkit.ReadinessOptional,
+				health: clientkit.Health{State: clientkit.HealthHealthy},
+			},
+			enabled: true,
+		}
+		if err := registry.Register(checker); err != nil {
+			t.Fatalf("Register() error = %v", err)
+		}
+		checker.enabled = false
+
+		summary := registry.CheckAll(context.Background())
+		if !summary.Ready || len(summary.Results) != 1 {
+			t.Fatalf("CheckAll() = %#v, want captured enabled checker", summary)
+		}
+		if checker.enabledCalls != 1 {
+			t.Fatalf("HealthCheckEnabled() calls = %d after CheckAll, want registration call only", checker.enabledCalls)
+		}
+	})
+
+	t.Run("captured disabled checker remains excluded", func(t *testing.T) {
+		registry := clientkit.NewRegistry()
+		checker := &configurableRegistryChecker{
+			registryClient: &registryClient{
+				name:   "optional-client",
+				policy: clientkit.ReadinessOptional,
+				health: clientkit.Health{State: clientkit.HealthHealthy},
+			},
+		}
+		if err := registry.Register(checker); err != nil {
+			t.Fatalf("Register() error = %v", err)
+		}
+		checker.enabled = true
+
+		summary := registry.CheckAll(context.Background())
+		if summary.Ready || summary.State != opskit.StateUnknown || len(summary.Results) != 0 {
+			t.Fatalf("CheckAll() = %#v, want no captured disabled checks", summary)
+		}
+		if checker.enabledCalls != 1 {
+			t.Fatalf("HealthCheckEnabled() calls = %d after CheckAll, want registration call only", checker.enabledCalls)
 		}
 	})
 
@@ -381,6 +441,18 @@ func TestRegistryRegisterAllIsAtomic(t *testing.T) {
 			clients: []clientkit.RegisteredClient{&registryClient{name: "delta"}, &registryClient{name: "epsilon", protocolEmpty: true}},
 			wantErr: "protocol is required",
 			absent:  "delta",
+		},
+		{
+			name: "enablement panic in batch",
+			clients: []clientkit.RegisteredClient{
+				&registryClient{name: "eta"},
+				&configurableRegistryChecker{
+					registryClient: &registryClient{name: "theta", policy: clientkit.ReadinessOptional},
+					enabledPanics:  true,
+				},
+			},
+			wantErr: "health check enablement panicked",
+			absent:  "eta",
 		},
 	}
 	for _, test := range tests {

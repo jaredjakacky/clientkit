@@ -56,6 +56,15 @@ func (t *Transport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return t.transport.RoundTrip(request)
 }
 
+// CloseIdleConnections forwards idle-pool cleanup to the wrapped transport
+// when it exposes the standard net/http optional capability.
+func (t *Transport) CloseIdleConnections() {
+	if t == nil || t.transport == nil {
+		return
+	}
+	t.transport.CloseIdleConnections()
+}
+
 func textMapInjection(propagator propagation.TextMapPropagator) func(context.Context, http.Header) {
 	return func(ctx context.Context, headers http.Header) {
 		if propagator == nil || headers == nil {

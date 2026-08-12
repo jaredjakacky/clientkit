@@ -140,7 +140,22 @@ func (t *Transport) RoundTrip(request *http.Request) (*http.Response, error) {
 	}
 	injectSafely(t.inject, ctx, attemptRequest.Header)
 
-	response, err := t.base.RoundTrip(attemptRequest)
+	var response *http.Response
+	var err error
+	if contextErr := attemptRequest.Context().Err(); contextErr != nil {
+		closeRequestBody(attemptRequest)
+		err = contextErr
+	} else {
+		response, err = t.base.RoundTrip(attemptRequest)
+		if contextErr := attemptRequest.Context().Err(); contextErr != nil {
+			closeResponseBody(response)
+			response = nil
+			err = contextErr
+		} else if response != nil && err != nil {
+			closeResponseBody(response)
+			response = nil
+		}
+	}
 	if response == nil && err == nil {
 		err = errors.New("clientkit: HTTP transport returned no response and no error")
 	}
@@ -155,6 +170,17 @@ func (t *Transport) RoundTrip(request *http.Request) (*http.Response, error) {
 	}
 	span.End(trace.WithTimestamp(endedAt))
 	return response, err
+}
+
+// CloseIdleConnections forwards idle-pool cleanup when the wrapped transport
+// exposes the standard net/http optional capability.
+func (t *Transport) CloseIdleConnections() {
+	if t == nil || t.base == nil {
+		return
+	}
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func (t *Transport) recordDuration(ctx context.Context, request *http.Request, response *http.Response, method httpconv.RequestMethodAttr, errorType string, duration time.Duration, metadata operationMetadata) {
@@ -323,20 +349,29 @@ func sanitizedURL(request *http.Request) string {
 		return ""
 	}
 	value := *request.URL
+	if value.Opaque != "" {
+		return ""
+	}
 	value.User = nil
 	value.Fragment = ""
 	value.RawFragment = ""
-	if value.RawQuery != "" || value.ForceQuery {
-		query := value.Query()
-		for key, values := range query {
-			for index := range values {
-				values[index] = "REDACTED"
-			}
-			query[key] = values
-		}
-		value.RawQuery = query.Encode()
-	}
+	value.RawQuery = ""
+	value.ForceQuery = false
 	return value.String()
+}
+
+func closeRequestBody(request *http.Request) {
+	if request == nil || request.Body == nil || request.Body == http.NoBody {
+		return
+	}
+	_ = request.Body.Close()
+}
+
+func closeResponseBody(response *http.Response) {
+	if response == nil || response.Body == nil {
+		return
+	}
+	_ = response.Body.Close()
 }
 
 func injectSafely(inject func(context.Context, http.Header), ctx context.Context, headers http.Header) {

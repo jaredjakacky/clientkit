@@ -65,7 +65,7 @@ func TestHTTPCheckConfigValidation(t *testing.T) {
 
 func TestHTTPCheckSuccessCachesHealthAndEmitsTelemetry(t *testing.T) {
 	observer := &healthRecordingObserver{}
-	body := &trackedReadCloser{Reader: strings.NewReader("healthy")}
+	body := &countingResponseBody{}
 	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodHead || request.URL.Path != "/healthz" {
 			t.Fatalf("health request = %s %s, want HEAD /healthz", request.Method, request.URL.Path)
@@ -90,8 +90,8 @@ func TestHTTPCheckSuccessCachesHealthAndEmitsTelemetry(t *testing.T) {
 	if health.State != clientkit.HealthHealthy || health.FailureClass != clientkit.FailureNone || health.Message != "HTTP health check succeeded" {
 		t.Fatalf("Check() = %#v, want healthy", health)
 	}
-	if health.CheckedAt.IsZero() || health.Duration < 0 || !body.closed {
-		t.Fatalf("Check() lifecycle = %#v, response body closed %t", health, body.closed)
+	if health.CheckedAt.IsZero() || health.Duration < 0 || !body.closed || body.reads != 0 {
+		t.Fatalf("Check() lifecycle = %#v, response body reads/closed = %d/%t", health, body.reads, body.closed)
 	}
 	if cached := client.Health(); cached != health {
 		t.Fatalf("Health() = %#v, want cached %#v", cached, health)

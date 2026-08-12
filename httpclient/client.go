@@ -99,7 +99,7 @@ func New(cfg Config) (*Client, error) {
 	}
 	if baseURL.Path == "" {
 		baseURL.Path = "/"
-	} else if !strings.HasSuffix(baseURL.Path, "/") {
+	} else if !strings.HasSuffix(baseURL.EscapedPath(), "/") {
 		baseURL.Path += "/"
 		if baseURL.RawPath != "" {
 			baseURL.RawPath += "/"

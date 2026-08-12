@@ -182,7 +182,7 @@ func TestTransportTargetAttributesAreSafeAndOptIn(t *testing.T) {
 				t.Fatalf("explicit target attributes = %s", serialized)
 			}
 			fullURL := urlValue.Value.AsString()
-			if !strings.Contains(fullURL, "token=REDACTED") || !strings.Contains(fullURL, "empty=REDACTED") || strings.Contains(fullURL, "user") {
+			if fullURL != "https://example.test:8443/accounts/123" {
 				t.Fatalf("sanitized url.full = %q", fullURL)
 			}
 		})
@@ -210,6 +210,74 @@ func TestTransportContainsInjectionPanicsAndPreservesCallerHeaders(t *testing.T)
 	if request.Header.Get("Caller") != "preserved" || request.Header.Get("Partial") != "" {
 		t.Fatalf("caller headers after RoundTrip = %#v", request.Header)
 	}
+}
+
+func TestTransportRejectsLateResultAfterCancellation(t *testing.T) {
+	traces := newTestTracerProvider()
+	meters, metrics := newTestMeterProvider()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	body := &trackedBody{Reader: strings.NewReader("late")}
+	transport, err := NewTransport(roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       body,
+			Request:    request,
+		}, nil
+	}), Config{
+		TracerProvider:  traces,
+		MeterProvider:   meters,
+		StandardMetrics: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTransport() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test/resource", nil)
+	type result struct {
+		response *http.Response
+		err      error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		response, roundTripErr := transport.RoundTrip(request)
+		resultCh <- result{response: response, err: roundTripErr}
+	}()
+	<-started
+	cancel()
+	close(release)
+	got := <-resultCh
+	if got.response != nil || !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("RoundTrip() = (%v, %v), want context.Canceled", got.response, got.err)
+	}
+	if !body.closed {
+		t.Fatal("late response body was not closed")
+	}
+	spans := traces.spans()
+	if len(spans) != 1 || spans[0].status != codes.Error || stringAttribute(spans[0].attributes, string(semconv.ErrorTypeKey)) != "canceled" {
+		t.Fatalf("spans = %#v, want one canceled error span", spans)
+	}
+	records := metrics.records()
+	if len(records) != 1 || stringAttribute(records[0].attributes.ToSlice(), string(semconv.ErrorTypeKey)) != "canceled" {
+		t.Fatalf("metric records = %#v, want canceled error.type", records)
+	}
+}
+
+func TestTransportForwardsCloseIdleConnections(t *testing.T) {
+	base := &idleClosingRoundTripper{}
+	transport, err := NewTransport(base, Config{})
+	if err != nil {
+		t.Fatalf("NewTransport() error = %v", err)
+	}
+	transport.CloseIdleConnections()
+	if base.closeCalls != 1 {
+		t.Fatalf("CloseIdleConnections calls = %d, want 1", base.closeCalls)
+	}
+	var nilTransport *Transport
+	nilTransport.CloseIdleConnections()
 }
 
 func TestTransportStandardMetricIsPerRoundTripAndSignalAttributesStaySeparate(t *testing.T) {
@@ -403,6 +471,18 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+type idleClosingRoundTripper struct {
+	closeCalls int
+}
+
+func (*idleClosingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, context.Canceled
+}
+
+func (transport *idleClosingRoundTripper) CloseIdleConnections() {
+	transport.closeCalls++
 }
 
 type trackedBody struct {

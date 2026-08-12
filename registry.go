@@ -49,19 +49,21 @@ type Registry struct {
 }
 
 type registeredClientEntry struct {
-	client   RegisteredClient
-	protocol string
-	policy   ReadinessPolicy
+	client             RegisteredClient
+	protocol           string
+	policy             ReadinessPolicy
+	healthCheckEnabled bool
 	// checkSlot serializes active checks for this client across overlapping
 	// CheckAll calls without holding the registry mutex during user code.
 	checkSlot chan struct{}
 }
 
 type validatedRegistration struct {
-	name     string
-	protocol string
-	policy   ReadinessPolicy
-	client   RegisteredClient
+	name               string
+	protocol           string
+	policy             ReadinessPolicy
+	healthCheckEnabled bool
+	client             RegisteredClient
 }
 
 type namedHealthChecker struct {
@@ -169,6 +171,9 @@ func (r *Registry) healthCheckersSnapshot() []namedHealthChecker {
 	r.mu.RLock()
 	checkers := make([]namedHealthChecker, 0, len(r.clients))
 	for name, entry := range r.clients {
+		if !entry.healthCheckEnabled {
+			continue
+		}
 		checker, ok := entry.client.(HealthChecker)
 		if !ok {
 			continue
@@ -182,15 +187,6 @@ func (r *Registry) healthCheckersSnapshot() []namedHealthChecker {
 		})
 	}
 	r.mu.RUnlock()
-
-	enabled := checkers[:0]
-	for _, entry := range checkers {
-		if !healthCheckEnabledSafely(entry.checker) {
-			continue
-		}
-		enabled = append(enabled, entry)
-	}
-	checkers = enabled
 
 	sort.Slice(checkers, func(i, j int) bool {
 		return checkers[i].name < checkers[j].name
@@ -258,9 +254,9 @@ func closeIdleConnectionsSafely(closer IdleConnectionCloser) {
 
 // Register validates and adds one client to the registry. Nil interfaces and
 // typed-nil pointers are rejected. Registration captures the client's stable
-// name, protocol, and readiness policy once and returns any validation or
-// duplicate error. The registry supports static composition; clients cannot be
-// replaced or unregistered.
+// name, protocol, readiness policy, and health-check enablement once and returns
+// any validation or duplicate error. The registry supports static composition;
+// clients cannot be replaced or unregistered.
 func (r *Registry) Register(client RegisteredClient) error {
 	return r.RegisterAll(client)
 }
@@ -276,9 +272,9 @@ func (r *Registry) MustRegister(client RegisteredClient) {
 
 // RegisterAll validates and atomically registers clients in argument order.
 // Nil interfaces and typed-nil pointers are rejected. Registration metadata is
-// captured once per client, and validation or duplicate errors register none
-// of the batch. The registry supports static composition; clients cannot be
-// replaced or unregistered.
+// captured once per client, including health-check enablement, and validation or
+// duplicate errors register none of the batch. The registry supports static
+// composition; clients cannot be replaced or unregistered.
 func (r *Registry) RegisterAll(clients ...RegisteredClient) error {
 	if r == nil {
 		return errors.New("clientkit: registry is required")
@@ -317,10 +313,11 @@ func (r *Registry) RegisterAll(clients ...RegisteredClient) error {
 		checkSlot := make(chan struct{}, 1)
 		checkSlot <- struct{}{}
 		r.clients[registration.name] = registeredClientEntry{
-			client:    registration.client,
-			protocol:  registration.protocol,
-			policy:    registration.policy,
-			checkSlot: checkSlot,
+			client:             registration.client,
+			protocol:           registration.protocol,
+			policy:             registration.policy,
+			healthCheckEnabled: registration.healthCheckEnabled,
+			checkSlot:          checkSlot,
 		}
 	}
 
@@ -365,11 +362,25 @@ func validateRegistration(client RegisteredClient) (validatedRegistration, error
 		return validatedRegistration{}, fmt.Errorf("clientkit: client %q: %w", name, err)
 	}
 	policy = normalizeReadinessPolicy(policy)
-	if checker, ok := client.(HealthChecker); ok && policy.BlocksReadiness() && !healthCheckEnabledSafely(checker) {
-		return validatedRegistration{}, fmt.Errorf("clientkit: client %q readiness policy requires an enabled health check", name)
+
+	healthCheckEnabled := false
+	if checker, ok := client.(HealthChecker); ok {
+		healthCheckEnabled, err = registeredClientHealthCheckEnabled(checker)
+		if err != nil {
+			return validatedRegistration{}, fmt.Errorf("clientkit: client %q: %w", name, err)
+		}
+		if policy.BlocksReadiness() && !healthCheckEnabled {
+			return validatedRegistration{}, fmt.Errorf("clientkit: client %q readiness policy requires an enabled health check", name)
+		}
 	}
 
-	return validatedRegistration{name: name, protocol: protocol, policy: policy, client: client}, nil
+	return validatedRegistration{
+		name:               name,
+		protocol:           protocol,
+		policy:             policy,
+		healthCheckEnabled: healthCheckEnabled,
+		client:             client,
+	}, nil
 }
 
 func registeredClientName(client RegisteredClient) (name string, err error) {
@@ -405,17 +416,18 @@ func registeredClientReadinessPolicy(client RegisteredClient) (policy ReadinessP
 	return client.ReadinessPolicy(), nil
 }
 
-func healthCheckEnabledSafely(checker HealthChecker) (enabled bool) {
+func registeredClientHealthCheckEnabled(checker HealthChecker) (enabled bool, err error) {
 	configurable, ok := checker.(HealthCheckConfigurable)
 	if !ok {
-		return true
+		return true, nil
 	}
 	defer func() {
 		if recover() != nil {
 			enabled = false
+			err = errors.New("health check enablement panicked")
 		}
 	}()
-	return configurable.HealthCheckEnabled()
+	return configurable.HealthCheckEnabled(), nil
 }
 
 func isNilRegisteredClient(client RegisteredClient) bool {

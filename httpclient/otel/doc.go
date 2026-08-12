@@ -9,12 +9,12 @@
 //
 // By default the transport omits server address, port, URL, and standard HTTP
 // metrics. WithRequestTargetAttributes explicitly adds server identity and a
-// url.full whose query values are redacted to spans. WithStandardClientMetrics
-// explicitly enables http.client.request.duration and its required
-// server.address and server.port dimensions. Metric attributes are configured
-// independently from span attributes; Clientkit never adds URLs or raw errors
-// to metrics automatically. Callers remain responsible for keeping explicitly
-// supplied metric attributes safe and low-cardinality.
+// url.full with user information, query, and fragment omitted.
+// WithStandardClientMetrics explicitly enables http.client.request.duration and
+// its required server.address and server.port dimensions. Metric attributes are
+// configured independently from span attributes; Clientkit never adds URLs or
+// raw errors to metrics automatically. Callers remain responsible for keeping
+// explicitly supplied metric attributes safe and low-cardinality.
 //
 // Both constructors capture applicable global OpenTelemetry providers or the
 // TextMapPropagator during construction unless explicit options are supplied.

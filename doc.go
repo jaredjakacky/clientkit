@@ -10,8 +10,8 @@
 // Registry status and readiness evaluation are passive: they read cached health
 // and never contact dependencies. Registry.CheckAll is the explicit boundary
 // for active health checks. Registration captures names, protocol categories,
-// and readiness policies once so later inspection does not depend on mutable
-// implementations.
+// readiness policies, and health-check enablement once so later operation and
+// inspection do not depend on mutable implementations.
 //
 // A nil Observer passed directly to New becomes a no-op observer. Protocol
 // constructors may install their documented default observer before creating

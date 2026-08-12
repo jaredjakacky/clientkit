@@ -23,6 +23,10 @@ var (
 	errRequestURLOpaque          = errors.New("clientkit: request URL must not use opaque form")
 	errRequestURLUserInformation = errors.New("clientkit: request URL must not include user information")
 	errRequestURLFragment        = errors.New("clientkit: request URL must not include a fragment")
+	errRequestURLScheme          = errors.New("clientkit: request URL must use http or https")
+	errRequestURLHostname        = errors.New("clientkit: request URL must include a hostname")
+	errRequestURI                = errors.New("clientkit: RequestURI must be empty for client requests")
+	errRequestMethod             = errors.New("clientkit: request method is invalid")
 	errRequestHostOverride       = errors.New("clientkit: request Host override is not allowed")
 	errRequestOriginMismatch     = errors.New("clientkit: request URL must match configured base URL origin")
 	errHTTPTransportNoResponse   = errors.New("clientkit: HTTP transport returned no response and no error")
@@ -155,9 +159,13 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		}
 	}
 	if err := c.validateRequestOrigin(request); err != nil {
+		stage := failureStageRequest
+		if isOriginPolicyError(err) {
+			stage = failureStagePolicy
+		}
 		return Result{
 			Outcome:      OutcomeTransportError,
-			FailureClass: classifyFailure(failureStagePolicy, nil, err),
+			FailureClass: classifyFailure(stage, nil, err),
 			Err:          err,
 		}
 	}
@@ -258,8 +266,8 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		if err != nil {
 			attemptCancel()
 			return Result{
-				Outcome:      OutcomeTransportError,
-				FailureClass: classifyFailure(failureStageRequest, nil, err),
+				Outcome:      classifyOutcome(nil, err),
+				FailureClass: classifyRequestPreparationFailure(err),
 				StartedAt:    operationStartedAt,
 				Duration:     time.Since(operationStartedAt),
 				Attempts:     attempts,
@@ -276,6 +284,11 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		response, err := httpClient.Do(attemptRequest)
 		endedAt := time.Now()
 		duration := endedAt.Sub(startedAt)
+		if contextErr := attemptCtx.Err(); contextErr != nil {
+			closeResponse(response)
+			response = nil
+			err = contextErr
+		}
 		if response == nil && err == nil {
 			err = errHTTPTransportNoResponse
 		}
@@ -284,16 +297,25 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		responseClassification := responseNotClassified
 		if err == nil && response != nil {
 			responseClassification = responseClassifier.classify(response)
-			switch responseClassification {
-			case responseClassifiedAccepted:
-				outcome = OutcomeSuccess
-				failureClass = clientkit.FailureNone
-			case responseClassifiedRejected:
-				outcome = OutcomeHTTPError
-				failureClass = clientkit.FailureRemoteResponse
-			default:
-				outcome = OutcomeHTTPError
-				failureClass = clientkit.FailurePolicy
+			if contextErr := attemptCtx.Err(); contextErr != nil {
+				closeResponse(response)
+				response = nil
+				err = contextErr
+				outcome = classifyOutcome(nil, err)
+				failureClass = classifyFailure(failureStageTransport, nil, err)
+				responseClassification = responseNotClassified
+			} else {
+				switch responseClassification {
+				case responseClassifiedAccepted:
+					outcome = OutcomeSuccess
+					failureClass = clientkit.FailureNone
+				case responseClassifiedRejected:
+					outcome = OutcomeHTTPError
+					failureClass = clientkit.FailureRemoteResponse
+				default:
+					outcome = OutcomeHTTPError
+					failureClass = clientkit.FailurePolicy
+				}
 			}
 		}
 		statusCode := 0
@@ -437,6 +459,9 @@ func (c *Client) executionHTTPClient() *http.Client {
 		} else if len(via) >= 10 {
 			return errRedirectLimitExceeded
 		}
+		if err := request.Context().Err(); err != nil {
+			return err
+		}
 
 		return c.validateRequestOrigin(request)
 	}
@@ -451,8 +476,22 @@ func (c *Client) validateRequestOrigin(request *http.Request) error {
 	if request == nil || request.URL == nil {
 		return errRequestURLRequired
 	}
+	if request.RequestURI != "" {
+		return errRequestURI
+	}
+	if request.Method != "" {
+		if _, err := http.NewRequest(request.Method, "http://clientkit.invalid", nil); err != nil {
+			return errRequestMethod
+		}
+	}
 	if !request.URL.IsAbs() || request.URL.Host == "" {
 		return errRequestURLMustBeAbsolute
+	}
+	if request.URL.Scheme != "http" && request.URL.Scheme != "https" {
+		return errRequestURLScheme
+	}
+	if request.URL.Hostname() == "" {
+		return errRequestURLHostname
 	}
 	if request.URL.Opaque != "" {
 		return errRequestURLOpaque
@@ -488,8 +527,23 @@ func isRequestPolicyError(err error) bool {
 		errors.Is(err, errRequestURLOpaque) ||
 		errors.Is(err, errRequestURLUserInformation) ||
 		errors.Is(err, errRequestURLFragment) ||
+		errors.Is(err, errRequestURLScheme) ||
+		errors.Is(err, errRequestURLHostname) ||
+		errors.Is(err, errRequestURI) ||
+		errors.Is(err, errRequestMethod) ||
 		errors.Is(err, errRequestHostOverride) ||
 		errors.Is(err, errRequestOriginMismatch)
+}
+
+func isOriginPolicyError(err error) bool {
+	return errors.Is(err, errRequestHostOverride) || errors.Is(err, errRequestOriginMismatch)
+}
+
+func classifyRequestPreparationFailure(err error) clientkit.FailureClass {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return classifyFailure(failureStageTransport, nil, err)
+	}
+	return classifyFailure(failureStageRequest, nil, err)
 }
 
 func requestBodyIsReplayable(request *http.Request) bool {
@@ -522,6 +576,19 @@ type observedResponseBody struct {
 	stop     func() bool
 	finished bool
 	complete func()
+}
+
+type observedReadWriteCloser struct {
+	*observedResponseBody
+	writer io.Writer
+}
+
+func (b *observedReadWriteCloser) Write(buffer []byte) (int, error) {
+	written, err := b.writer.Write(buffer)
+	if err != nil {
+		b.finish()
+	}
+	return written, err
 }
 
 func (b *observedResponseBody) Read(buffer []byte) (int, error) {
@@ -568,9 +635,14 @@ func attachResponseLifecycle(response *http.Response, ctx context.Context, compl
 		return false
 	}
 
-	wrapper := &observedResponseBody{ReadCloser: response.Body, complete: complete}
+	body := response.Body
+	wrapper := &observedResponseBody{ReadCloser: body, complete: complete}
 	wrapper.setStop(context.AfterFunc(ctx, wrapper.finish))
-	response.Body = wrapper
+	if writer, ok := body.(io.Writer); ok {
+		response.Body = &observedReadWriteCloser{observedResponseBody: wrapper, writer: writer}
+	} else {
+		response.Body = wrapper
+	}
 	return true
 }
 
@@ -579,13 +651,6 @@ func closeResponse(response *http.Response) {
 		return
 	}
 
-	// A bounded drain improves connection reuse for small responses without
-	// reading into a known-large intermediate body. Unknown-length responses are
-	// still bounded because they may be small and reusable.
-	const drainLimit = 32 << 10
-	if response.ContentLength < 0 || response.ContentLength <= drainLimit {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, drainLimit))
-	}
 	_ = response.Body.Close()
 }
 
@@ -611,6 +676,9 @@ func requestForAttempt(request *http.Request, ctx context.Context, attemptNumber
 	if attemptNumber < 1 {
 		return nil, errors.New("clientkit: attempt number must be at least 1")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Clone protects caller-owned headers, URL values, and context while keeping
 	// net/http's standard first-attempt body ownership semantics.
@@ -626,6 +694,12 @@ func requestForAttempt(request *http.Request, ctx context.Context, attemptNumber
 	// Recreate retry bodies only when the next attempt begins; no open body is
 	// retained during backoff or Retry-After waiting.
 	body, err := request.GetBody()
+	if contextErr := ctx.Err(); contextErr != nil {
+		if body != nil {
+			_ = body.Close()
+		}
+		return nil, contextErr
+	}
 	if err != nil {
 		if body != nil {
 			_ = body.Close()

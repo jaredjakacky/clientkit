@@ -143,5 +143,18 @@ func (t *propagatingRoundTripper) RoundTrip(request *http.Request) (*http.Respon
 	cloned := request.Clone(request.Context())
 	cloned.Header = request.Header.Clone()
 	SafeHeaderPropagator(t.propagator).Inject(cloned.Context(), cloned.Header)
-	return base.RoundTrip(cloned)
+	if err := cloned.Context().Err(); err != nil {
+		closeRequestBody(cloned)
+		return nil, err
+	}
+	response, err := base.RoundTrip(cloned)
+	if contextErr := cloned.Context().Err(); contextErr != nil {
+		closeResponse(response)
+		return nil, contextErr
+	}
+	if response != nil && err != nil {
+		closeResponse(response)
+		return nil, err
+	}
+	return response, err
 }

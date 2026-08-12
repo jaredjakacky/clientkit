@@ -1,6 +1,7 @@
 package httpclient_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -215,6 +216,46 @@ func TestHTTPResponseBodyCompletionReleasesExecutionContext(t *testing.T) {
 	}
 }
 
+func TestHTTPResponseBodyPreservesSwitchingProtocolWriter(t *testing.T) {
+	body := &upgradedResponseBody{Reader: strings.NewReader("server data")}
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusSwitchingProtocols,
+			Header:     make(http.Header),
+			Body:       body,
+			Request:    request,
+		}, nil
+	}, httpclient.Config{Retry: httpclient.NoRetryConfig()})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/upgrade", nil)
+	response, err := client.Do(request)
+	if err != nil || response == nil {
+		t.Fatalf("Do() = (%v, %v), want switching-protocol response", response, err)
+	}
+	upgraded, ok := response.Body.(io.ReadWriteCloser)
+	if !ok {
+		t.Fatalf("response body = %T, want io.ReadWriteCloser", response.Body)
+	}
+	if _, err := upgraded.Write([]byte("client data")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if got := body.written.String(); got != "client data" {
+		t.Fatalf("underlying write = %q, want client data", got)
+	}
+	if err := upgraded.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if !body.closed {
+		t.Fatal("upgraded response body was not closed")
+	}
+
+	ordinary := lifecycleHTTPClient(t, io.NopCloser(strings.NewReader("payload")), make(chan clientkit.OperationEndEvent, 1))
+	ordinaryResponse := executeLifecycleRequest(t, ordinary)
+	defer ordinaryResponse.Body.Close()
+	if _, ok := ordinaryResponse.Body.(io.Writer); ok {
+		t.Fatalf("ordinary response body = %T, unexpectedly implements io.Writer", ordinaryResponse.Body)
+	}
+}
+
 func withHTTPObserver(cfg httpclient.Config, end func(clientkit.OperationEndEvent)) httpclient.Config {
 	cfg.Config = clientkit.Config{Name: "body-timeout", Observer: executionObserver{end: end}}
 	cfg.Retry = httpclient.NoRetryConfig()
@@ -248,6 +289,21 @@ type failingResponseBody struct {
 
 type contextBlockingBody struct {
 	ctx context.Context
+}
+
+type upgradedResponseBody struct {
+	io.Reader
+	written bytes.Buffer
+	closed  bool
+}
+
+func (body *upgradedResponseBody) Write(buffer []byte) (int, error) {
+	return body.written.Write(buffer)
+}
+
+func (body *upgradedResponseBody) Close() error {
+	body.closed = true
+	return nil
 }
 
 func (body contextBlockingBody) Read([]byte) (int, error) {

@@ -567,20 +567,20 @@ func TestRegistryCheckAllSharesConcurrencyBoundAcrossCalls(t *testing.T) {
 			t.Fatalf("NewRegistryWithConfig() error = %v", err)
 		}
 
-		entered := make(chan string, 2)
+		entered := make(chan string, 4)
 		release := make(chan struct{})
 		first := &operationalClient{
 			name: "first", policy: clientkit.ReadinessOptional, enabled: true,
 			check: func(context.Context) clientkit.Health {
 				entered <- "first"
-				<-release
 				return clientkit.Health{State: clientkit.HealthHealthy}
 			},
 		}
 		second := &operationalClient{
-			name: "second", policy: clientkit.ReadinessOptional,
+			name: "second", policy: clientkit.ReadinessOptional, enabled: true,
 			check: func(context.Context) clientkit.Health {
 				entered <- "second"
+				<-release
 				return clientkit.Health{State: clientkit.HealthHealthy}
 			},
 		}
@@ -594,11 +594,13 @@ func TestRegistryCheckAllSharesConcurrencyBoundAcrossCalls(t *testing.T) {
 		if got := <-entered; got != "first" {
 			t.Fatalf("first entered check = %q, want first", got)
 		}
+		if got := <-entered; got != "second" {
+			t.Fatalf("second entered check = %q, want second", got)
+		}
 
-		// Give the overlapping call a disjoint checker snapshot. Its check must
-		// still wait for the registry-wide permit held by the first call.
-		first.enabled = false
-		second.enabled = true
+		// The first call has advanced to second and holds the global permit. Its
+		// first-client slot is free, so only the registry-wide bound can prevent
+		// the overlapping call from entering first concurrently.
 		go func() { done <- registry.CheckAll(context.Background()) }()
 		synctest.Wait()
 		if got := len(entered); got != 0 {
@@ -607,15 +609,248 @@ func TestRegistryCheckAllSharesConcurrencyBoundAcrossCalls(t *testing.T) {
 
 		close(release)
 		synctest.Wait()
+		if got := <-entered; got != "first" {
+			t.Fatalf("overlapping first check = %q, want first", got)
+		}
 		if got := <-entered; got != "second" {
-			t.Fatalf("second entered check = %q, want second", got)
+			t.Fatalf("overlapping second check = %q, want second", got)
 		}
 		for range 2 {
-			if summary := <-done; !summary.Ready || len(summary.Results) != 1 {
-				t.Fatalf("CheckAll() = %#v, want one ready result", summary)
+			if summary := <-done; !summary.Ready || len(summary.Results) != 2 {
+				t.Fatalf("CheckAll() = %#v, want two ready results", summary)
 			}
 		}
 	})
+}
+
+func TestRegistryCheckAllClassifiesDeadlineWhileWaitingForGlobalPermit(t *testing.T) {
+	registry, err := clientkit.NewRegistryWithConfig(clientkit.RegistryConfig{MaxConcurrentChecks: 1})
+	if err != nil {
+		t.Fatalf("NewRegistryWithConfig() error = %v", err)
+	}
+
+	entered := make(chan string, 2)
+	releaseSecond := make(chan struct{})
+	first := &operationalClient{
+		name: "first", policy: clientkit.ReadinessOptional, enabled: true,
+		check: func(context.Context) clientkit.Health {
+			entered <- "first"
+			return clientkit.Health{State: clientkit.HealthHealthy}
+		},
+	}
+	second := &operationalClient{
+		name: "second", policy: clientkit.ReadinessOptional, enabled: true,
+		check: func(context.Context) clientkit.Health {
+			entered <- "second"
+			<-releaseSecond
+			return clientkit.Health{State: clientkit.HealthHealthy}
+		},
+	}
+	if err := registry.RegisterAll(first, second); err != nil {
+		t.Fatalf("RegisterAll() error = %v", err)
+	}
+
+	firstDone := make(chan opskit.CheckSummary, 1)
+	go func() { firstDone <- registry.CheckAll(context.Background()) }()
+	for _, want := range []string{"first", "second"} {
+		select {
+		case got := <-entered:
+			if got != want {
+				t.Fatalf("entered check = %q, want %q", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s check did not start", want)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	secondDone := make(chan opskit.CheckSummary, 1)
+	go func() { secondDone <- registry.CheckAll(ctx) }()
+
+	select {
+	case summary := <-secondDone:
+		if summary.State != opskit.StateFailed || summary.Ready || len(summary.Results) != 1 {
+			t.Fatalf("deadline CheckAll() = %#v, want one failed result", summary)
+		}
+		result := summary.Results[0]
+		if result.Name != "first" || operationalAttribute(result.Result.Attributes, "failure_class") != string(clientkit.FailureTimeout) {
+			t.Fatalf("deadline result = %#v, want first classified timeout", result)
+		}
+		if result.Result.Message != "client health check timed out before execution" {
+			t.Fatalf("deadline message = %q, want pre-execution timeout", result.Result.Message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("overlapping CheckAll did not honor its deadline while waiting for the global permit")
+	}
+
+	close(releaseSecond)
+	select {
+	case summary := <-firstDone:
+		if !summary.Ready || len(summary.Results) != 2 {
+			t.Fatalf("first CheckAll() = %#v, want two completed checks", summary)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first CheckAll did not finish after release")
+	}
+}
+
+func TestRegistryCheckAllRejectsLateCheckerResults(t *testing.T) {
+	tests := []struct {
+		name        string
+		deadline    bool
+		wantFailure clientkit.FailureClass
+		wantMessage string
+	}{
+		{
+			name:        "parent cancellation",
+			wantFailure: clientkit.FailureCanceled,
+			wantMessage: "client health check canceled before result acceptance",
+		},
+		{
+			name:        "deadline",
+			deadline:    true,
+			wantFailure: clientkit.FailureTimeout,
+			wantMessage: "client health check timed out before result acceptance",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := clientkit.NewRegistry()
+			checkerContext := make(chan context.Context, 1)
+			release := make(chan struct{})
+			client := &operationalClient{
+				name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+				check: func(ctx context.Context) clientkit.Health {
+					checkerContext <- ctx
+					<-release
+					return clientkit.Health{State: clientkit.HealthHealthy, Message: "late healthy result"}
+				},
+			}
+			if err := registry.Register(client); err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			if test.deadline {
+				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Millisecond)
+			}
+			defer cancel()
+			results := make(chan opskit.CheckSummary, 1)
+			go func() { results <- registry.CheckAll(ctx) }()
+
+			var callbackContext context.Context
+			select {
+			case callbackContext = <-checkerContext:
+			case <-time.After(time.Second):
+				t.Fatal("health checker was not invoked")
+			}
+			if !test.deadline {
+				cancel()
+			}
+			select {
+			case <-callbackContext.Done():
+			case <-time.After(time.Second):
+				t.Fatal("health checker context did not complete")
+			}
+			close(release)
+
+			var summary opskit.CheckSummary
+			select {
+			case summary = <-results:
+			case <-time.After(time.Second):
+				t.Fatal("CheckAll did not return after releasing checker")
+			}
+			if summary.State != opskit.StateFailed || summary.Ready || len(summary.Results) != 1 {
+				t.Fatalf("CheckAll() = %#v, want failed late-result rejection", summary)
+			}
+			result := summary.Results[0].Result
+			if result.State != opskit.StateUnknown || result.Ready || result.Message != test.wantMessage {
+				t.Fatalf("late check result = %#v, want unknown not-ready %q", result, test.wantMessage)
+			}
+			if got := operationalAttribute(result.Attributes, "failure_class"); got != string(test.wantFailure) {
+				t.Fatalf("failure_class = %q, want %q", got, test.wantFailure)
+			}
+		})
+	}
+}
+
+func TestRegistryCheckAllRejectsResultWhenSanitizerCrossesCancellation(t *testing.T) {
+	sanitizerEntered := make(chan struct{}, 1)
+	releaseSanitizer := make(chan struct{})
+	registry, err := clientkit.NewRegistryWithConfig(clientkit.RegistryConfig{
+		HealthSanitizer: func(_ string, health clientkit.Health) clientkit.Health {
+			sanitizerEntered <- struct{}{}
+			<-releaseSanitizer
+			health.State = clientkit.HealthHealthy
+			health.FailureClass = clientkit.FailureNone
+			health.Message = "late sanitized success"
+			return health
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistryWithConfig() error = %v", err)
+	}
+	client := &operationalClient{
+		name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+		check: func(context.Context) clientkit.Health {
+			return clientkit.Health{State: clientkit.HealthHealthy}
+		},
+	}
+	if err := registry.Register(client); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	results := make(chan opskit.CheckSummary, 1)
+	go func() { results <- registry.CheckAll(ctx) }()
+	select {
+	case <-sanitizerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("registry sanitizer was not invoked")
+	}
+	cancel()
+	close(releaseSanitizer)
+
+	select {
+	case summary := <-results:
+		if summary.State != opskit.StateFailed || summary.Ready || len(summary.Results) != 1 {
+			t.Fatalf("CheckAll() = %#v, want failed sanitizer result rejection", summary)
+		}
+		result := summary.Results[0].Result
+		if result.State != opskit.StateUnknown || result.Ready || result.Message != "client health check canceled before result acceptance" {
+			t.Fatalf("sanitizer result = %#v, want canceled rejection", result)
+		}
+		if got := operationalAttribute(result.Attributes, "failure_class"); got != string(clientkit.FailureCanceled) {
+			t.Fatalf("failure_class = %q, want %q", got, clientkit.FailureCanceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CheckAll did not return after releasing sanitizer")
+	}
+}
+
+func TestRegistryCheckAllCompletionWinsBeforeLaterCancellation(t *testing.T) {
+	registry := clientkit.NewRegistry()
+	client := &operationalClient{
+		name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+		check: func(context.Context) clientkit.Health {
+			return clientkit.Health{State: clientkit.HealthHealthy, Message: "completed"}
+		},
+	}
+	if err := registry.Register(client); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	summary := registry.CheckAll(ctx)
+	if !summary.Ready || summary.State != opskit.StateReady || len(summary.Results) != 1 {
+		t.Fatalf("CheckAll() = %#v, want completed ready result", summary)
+	}
+	cancel()
+	if result := summary.Results[0].Result; !result.Ready || result.State != opskit.StateReady || result.Message != "completed" {
+		t.Fatalf("completed result after later cancellation = %#v", result)
+	}
 }
 
 func TestRegistryCheckAllCancelsWhileWaitingForClient(t *testing.T) {

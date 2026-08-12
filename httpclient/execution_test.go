@@ -118,6 +118,10 @@ func TestHTTPExecuteInputValidation(t *testing.T) {
 		{name: "opaque URL", request: &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "https", Host: "example.test", Opaque: "opaque"}}},
 		{name: "URL user information", request: mustRequest(t, "https://user@example.test/resource")},
 		{name: "URL fragment", request: mustRequest(t, "https://example.test/resource#fragment")},
+		{name: "client RequestURI", request: &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "https", Host: "example.test", Path: "/resource"}, RequestURI: "/resource"}},
+		{name: "invalid method", request: &http.Request{Method: "BAD METHOD", URL: &url.URL{Scheme: "https", Host: "example.test", Path: "/resource"}}},
+		{name: "unsupported scheme", request: &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "file", Host: "example.test", Path: "/resource"}}},
+		{name: "missing hostname", request: &http.Request{Method: http.MethodGet, URL: &url.URL{Scheme: "https", Host: ":443", Path: "/resource"}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -146,6 +150,27 @@ func TestHTTPExecuteInputValidation(t *testing.T) {
 	}
 	if !nilBody.closed {
 		t.Fatal("nil client did not close request body")
+	}
+}
+
+func TestHTTPExecuteRejectsNonHTTPSchemeWhenCrossOriginIsEnabled(t *testing.T) {
+	calls := 0
+	client := newHTTPTestClient(t, func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("transport must not run")
+	}, httpclient.Config{AllowCrossOrigin: true, Retry: httpclient.NoRetryConfig()})
+	request := &http.Request{
+		Method: http.MethodGet,
+		URL:    &url.URL{Scheme: "file", Host: "other.test", Path: "/resource"},
+		Header: make(http.Header),
+		Body:   &trackedReadCloser{Reader: strings.NewReader("payload")},
+	}
+	result := client.Execute(request)
+	if result.FailureClass != clientkit.FailureRequest || result.Err == nil || len(result.Attempts) != 0 || calls != 0 {
+		t.Fatalf("Execute() = %#v with %d calls, want pre-attempt request rejection", result, calls)
+	}
+	if !request.Body.(*trackedReadCloser).closed {
+		t.Fatal("rejected non-HTTP request body was not closed")
 	}
 }
 
@@ -210,6 +235,170 @@ func TestHTTPAttemptTimeout(t *testing.T) {
 	result := client.Execute(request)
 	if result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout || !errors.Is(result.Err, context.DeadlineExceeded) {
 		t.Fatalf("Execute() = %#v, want attempt timeout", result)
+	}
+}
+
+func TestHTTPExecuteRejectsLateTransportResults(t *testing.T) {
+	tests := []struct {
+		name       string
+		returnBoth bool
+		returnErr  bool
+	}{
+		{name: "response"},
+		{name: "response and error", returnBoth: true, returnErr: true},
+		{name: "error", returnErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := &trackedReadCloser{Reader: strings.NewReader("late")}
+			lateErr := errors.New("late transport failure")
+			client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				var response *http.Response
+				if !test.returnErr || test.returnBoth {
+					response = &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       body,
+						Request:    request,
+					}
+				}
+				if test.returnErr {
+					return response, lateErr
+				}
+				return response, nil
+			}, httpclient.Config{
+				DisableTimeout: true,
+				AttemptTimeout: 10 * time.Millisecond,
+				Retry:          httpclient.NoRetryConfig(),
+			})
+			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+			result := client.Execute(request)
+			if result.Response != nil || result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout || !errors.Is(result.Err, context.DeadlineExceeded) || len(result.Attempts) != 1 {
+				t.Fatalf("Execute() = %#v, want one deadline-exceeded attempt", result)
+			}
+			if (!test.returnErr || test.returnBoth) && !body.closed {
+				t.Fatal("late response body was not closed")
+			}
+		})
+	}
+}
+
+func TestHTTPExecuteRejectsLateSuccessAfterCallerHTTPClientTimeout(t *testing.T) {
+	body := &trackedReadCloser{Reader: strings.NewReader("late")}
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: request}, nil
+	}, httpclient.Config{
+		HTTPClient:            &http.Client{Timeout: 10 * time.Millisecond},
+		DisableTimeout:        true,
+		DisableAttemptTimeout: true,
+		Retry:                 httpclient.NoRetryConfig(),
+	})
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+	result := client.Execute(request)
+	if result.Response != nil || result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout || !errors.Is(result.Err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() = %#v, want caller HTTP client timeout", result)
+	}
+	if !body.closed {
+		t.Fatal("late response after caller HTTP client timeout was not closed")
+	}
+}
+
+func TestHTTPExecuteParentCancellationWinsConcurrentTransportSuccess(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	body := &trackedReadCloser{Reader: strings.NewReader("late")}
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: request}, nil
+	}, httpclient.Config{
+		DisableTimeout:        true,
+		DisableAttemptTimeout: true,
+		Retry:                 httpclient.NoRetryConfig(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test/resource", nil)
+	resultCh := make(chan httpclient.Result, 1)
+	go func() { resultCh <- client.Execute(request) }()
+	<-started
+	cancel()
+	close(release)
+	result := <-resultCh
+	if result.Response != nil || result.Outcome != httpclient.OutcomeCanceled || result.FailureClass != clientkit.FailureCanceled || !errors.Is(result.Err, context.Canceled) {
+		t.Fatalf("Execute() = %#v, want parent cancellation", result)
+	}
+	if !body.closed {
+		t.Fatal("response losing the cancellation race was not closed")
+	}
+}
+
+func TestHTTPExecuteRejectsClassificationCompletedAfterCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	body := &trackedReadCloser{Reader: strings.NewReader("late")}
+	classifier := httpclient.ResponseClassifierFunc(func(*http.Response) httpclient.ResponseDisposition {
+		close(entered)
+		<-release
+		return httpclient.ResponseAccepted
+	})
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: request}, nil
+	}, httpclient.Config{
+		DisableTimeout:        true,
+		DisableAttemptTimeout: true,
+		ResponseClassifier:    classifier,
+		Retry:                 httpclient.NoRetryConfig(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.test/resource", nil)
+	resultCh := make(chan httpclient.Result, 1)
+	go func() { resultCh <- client.Execute(request) }()
+	<-entered
+	cancel()
+	close(release)
+	result := <-resultCh
+	if result.Response != nil || result.Outcome != httpclient.OutcomeCanceled || result.FailureClass != clientkit.FailureCanceled || !errors.Is(result.Err, context.Canceled) {
+		t.Fatalf("Execute() = %#v, want cancellation after late classification", result)
+	}
+	if !body.closed {
+		t.Fatal("response was not closed after late classification")
+	}
+}
+
+func TestHTTPExecuteRejectsBodyRecreatedAfterCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	recreated := &trackedReadCloser{Reader: strings.NewReader("payload")}
+	calls := 0
+	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+		calls++
+		_ = request.Body.Close()
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+	}, httpclient.Config{Retry: httpclient.RetryConfig{
+		MaxAttempts: 2,
+		StatusCodes: []int{http.StatusServiceUnavailable},
+		Methods:     []string{http.MethodPut},
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, "https://example.test/resource", strings.NewReader("payload"))
+	request.GetBody = func() (io.ReadCloser, error) {
+		close(entered)
+		<-release
+		return recreated, nil
+	}
+	resultCh := make(chan httpclient.Result, 1)
+	go func() { resultCh <- client.Execute(request) }()
+	<-entered
+	cancel()
+	close(release)
+	result := <-resultCh
+	if result.Response != nil || result.Outcome != httpclient.OutcomeCanceled || result.FailureClass != clientkit.FailureCanceled || !errors.Is(result.Err, context.Canceled) || len(result.Attempts) != 1 || calls != 1 {
+		t.Fatalf("Execute() = %#v with %d transport calls, want canceled before retry transport", result, calls)
+	}
+	if !recreated.closed {
+		t.Fatal("body recreated after cancellation was not closed")
 	}
 }
 

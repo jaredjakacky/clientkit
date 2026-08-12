@@ -67,6 +67,40 @@ func TestHTTPTransportInstrumentationRespectsOwnershipAndExplicitObservation(t *
 	})
 }
 
+func TestHTTPClientClosesIdleConnectionsThroughInstrumentation(t *testing.T) {
+	base := &internalIdleClosingTransport{}
+	instrumented, err := httpotel.NewTransport(base, httpotel.Config{})
+	if err != nil {
+		t.Fatalf("NewTransport() error = %v", err)
+	}
+	client, err := New(Config{
+		Config:     clientkit.Config{Name: "idle-cleanup", Observer: clientkit.NopObserver{}},
+		BaseURL:    "https://example.test",
+		HTTPClient: &http.Client{Transport: instrumented},
+		Propagator: NopHeaderPropagator{},
+		Retry:      NoRetryConfig(),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	client.CloseIdleConnections()
+	if base.closeCalls != 1 {
+		t.Fatalf("CloseIdleConnections calls = %d, want 1", base.closeCalls)
+	}
+}
+
+type internalIdleClosingTransport struct {
+	closeCalls int
+}
+
+func (*internalIdleClosingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, context.Canceled
+}
+
+func (transport *internalIdleClosingTransport) CloseIdleConnections() {
+	transport.closeCalls++
+}
+
 func TestHTTPDefaultCheckStalenessPreservesRequiredReadinessAcrossNominalCadence(t *testing.T) {
 	client := newHTTPHealthProjectionClient(t, clientkit.ReadinessRequired, DefaultCheckConfig("/healthz"))
 	registry := clientkit.NewRegistry()

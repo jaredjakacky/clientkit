@@ -34,7 +34,8 @@ type CheckConfig struct {
 
 	// Method is the health-check request method.
 	Method string
-	// Path is the required relative health-check URL reference.
+	// Path is the required relative health-check URL reference. It uses the same
+	// RFC 3986 BaseURL resolution semantics as NewRequest.
 	Path string
 
 	// Timeout bounds the complete health-check execution.

@@ -63,12 +63,39 @@ func TestTransportZeroValueReturnsConfigurationError(t *testing.T) {
 	if response, err := transport.RoundTrip(request); response != nil || err == nil {
 		t.Fatalf("zero Transport.RoundTrip() = (%v, %v), want configuration error", response, err)
 	}
+	transport.CloseIdleConnections()
+}
+
+func TestTransportForwardsCloseIdleConnections(t *testing.T) {
+	base := &idleClosingTransport{}
+	transport, err := httpclientotel.NewTransport(base)
+	if err != nil {
+		t.Fatalf("NewTransport() error = %v", err)
+	}
+	transport.CloseIdleConnections()
+	if base.closeCalls != 1 {
+		t.Fatalf("CloseIdleConnections calls = %d, want 1", base.closeCalls)
+	}
+	var nilTransport *httpclientotel.Transport
+	nilTransport.CloseIdleConnections()
 }
 
 type transportFunc func(*http.Request) (*http.Response, error)
 
 func (fn transportFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
+}
+
+type idleClosingTransport struct {
+	closeCalls int
+}
+
+func (*idleClosingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, context.Canceled
+}
+
+func (transport *idleClosingTransport) CloseIdleConnections() {
+	transport.closeCalls++
 }
 
 type testTextMapPropagator struct{}

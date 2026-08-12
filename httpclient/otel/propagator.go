@@ -81,8 +81,8 @@ func WithMetricAttributes(attributes ...attribute.KeyValue) Option {
 }
 
 // WithRequestTargetAttributes includes server.address, server.port, and a URL
-// with every query value redacted on physical HTTP spans. It is disabled by
-// default because paths and endpoint identity may be sensitive.
+// with user information, query, and fragment omitted on physical HTTP spans. It
+// is disabled by default because paths and endpoint identity may be sensitive.
 func WithRequestTargetAttributes() Option {
 	return func(cfg *config) {
 		cfg.requestTargets = true
