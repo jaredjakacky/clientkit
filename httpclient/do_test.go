@@ -143,7 +143,7 @@ func TestRetryRejectsInvalidRecreatedBodies(t *testing.T) {
 			request, _ := http.NewRequest(http.MethodPut, "https://example.test/resource", strings.NewReader("payload"))
 			request.GetBody = getBody
 			result := client.Execute(request)
-			if result.Outcome != httpclient.OutcomeTransportError || result.FailureClass != clientkit.FailureRequest || result.Err == nil || !strings.Contains(result.Err.Error(), test.wantDetail) || len(result.Attempts) != 1 || result.Response != nil {
+			if result.Outcome != httpclient.OutcomeExecutionError || result.FailureClass != clientkit.FailureRequest || result.Err == nil || !strings.Contains(result.Err.Error(), test.wantDetail) || len(result.Attempts) != 1 || result.Response != nil {
 				t.Fatalf("Execute() = %#v, want explicit body-recreation failure", result)
 			}
 			if test.wantErr != nil && !errors.Is(result.Err, test.wantErr) {

@@ -146,7 +146,7 @@ func TestTLSDialHandshakeAndPolicyCloning(t *testing.T) {
 			observer := &tcpObserver{}
 			serverResults := make(chan error, 1)
 			client := newCustomTCPClient(t, tlsPipeDialer(t, serverConfig, serverResults), func(config *tcpclient.Config) {
-				config.Observer = observer
+				config.Config.Observer = observer
 				config.TLS = tcpclient.TLSConfig{Enabled: true, Config: clientPolicy}
 			})
 
@@ -201,7 +201,7 @@ func TestTLSDialFailureClassification(t *testing.T) {
 		client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 			return connection, nil
 		}, func(config *tcpclient.Config) {
-			config.Observer = observer
+			config.Config.Observer = observer
 			config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{InsecureSkipVerify: true}}
 		})
 		result := client.DialResult(context.Background())
@@ -250,7 +250,7 @@ func TestTLSDialFailureClassification(t *testing.T) {
 		client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 			return connection, nil
 		}, func(config *tcpclient.Config) {
-			config.Observer = observer
+			config.Config.Observer = observer
 			config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{InsecureSkipVerify: true}}
 		})
 		ctx, cancel := context.WithCancel(context.Background())
@@ -291,7 +291,7 @@ func TestTLSDialFailureClassification(t *testing.T) {
 		client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 			return connection, nil
 		}, func(config *tcpclient.Config) {
-			config.Observer = observer
+			config.Config.Observer = observer
 			config.TLS = tcpclient.TLSConfig{
 				Enabled: true, Config: &tls.Config{InsecureSkipVerify: true},
 				HandshakeTimeout: 10 * time.Millisecond,
@@ -319,7 +319,7 @@ func TestTLSHandshakeNetworkTimeoutPreservesOriginalObserverError(t *testing.T) 
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 		return connection, nil
 	}, func(config *tcpclient.Config) {
-		config.Observer = observer
+		config.Config.Observer = observer
 		config.TLS = tcpclient.TLSConfig{Enabled: true, Config: &tls.Config{InsecureSkipVerify: true}}
 	})
 
@@ -484,7 +484,7 @@ func TestTLSHandshakeRejectsLateVerificationResults(t *testing.T) {
 			client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 				return connection, nil
 			}, func(config *tcpclient.Config) {
-				config.Observer = observer
+				config.Config.Observer = observer
 				config.TLS = tcpclient.TLSConfig{
 					Enabled: true,
 					Config: &tls.Config{

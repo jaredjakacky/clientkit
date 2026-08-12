@@ -115,7 +115,7 @@ func AcceptStatusRange(minimum, maximum int) (ResponseClassifier, error) {
 
 // SafeResponseClassifier contains classifier panics and unsupported results.
 // Nil selects DefaultResponseClassifier. During Client execution, either
-// condition becomes OutcomeHTTPError with FailurePolicy and is never retried.
+// condition becomes OutcomeExecutionError with FailurePolicy and is never retried.
 func SafeResponseClassifier(classifier ResponseClassifier) ResponseClassifier {
 	return normalizeResponseClassifier(classifier)
 }

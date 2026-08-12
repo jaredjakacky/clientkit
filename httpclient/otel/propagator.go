@@ -25,12 +25,11 @@ type config struct {
 	standardMetrics        bool
 }
 
-// Option configures the package's propagator and transport adapters. Each
-// constructor uses the options relevant to it.
+// Option configures a Transport during construction.
 type Option func(*config)
 
-// WithTextMapPropagator uses propagator for outbound injection. A nil value
-// falls back to the global OpenTelemetry propagator during construction.
+// WithTextMapPropagator uses propagator for Transport outbound injection. A nil
+// value falls back to the global OpenTelemetry propagator during construction.
 func WithTextMapPropagator(propagator propagation.TextMapPropagator) Option {
 	return func(cfg *config) {
 		cfg.propagator = propagator
@@ -104,19 +103,19 @@ type Propagator struct {
 	propagator propagation.TextMapPropagator
 }
 
-// New constructs a Propagator, capturing the global OpenTelemetry text-map
-// propagator when no explicit propagator is supplied.
-func New(options ...Option) *Propagator {
-	cfg := config{}
-	for _, option := range options {
-		if option != nil {
-			option(&cfg)
-		}
+// New constructs a Propagator and captures the global OpenTelemetry text-map
+// propagator.
+func New() *Propagator {
+	return NewWithTextMapPropagator(nil)
+}
+
+// NewWithTextMapPropagator constructs a Propagator using propagator. A nil
+// value captures the global OpenTelemetry text-map propagator.
+func NewWithTextMapPropagator(propagator propagation.TextMapPropagator) *Propagator {
+	if propagator == nil {
+		propagator = globalotel.GetTextMapPropagator()
 	}
-	if cfg.propagator == nil {
-		cfg.propagator = globalotel.GetTextMapPropagator()
-	}
-	return &Propagator{propagator: cfg.propagator}
+	return &Propagator{propagator: propagator}
 }
 
 // Inject writes the configured OpenTelemetry propagation fields into headers.

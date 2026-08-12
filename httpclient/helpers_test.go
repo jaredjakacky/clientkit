@@ -10,11 +10,11 @@ import (
 
 func newHTTPTestClient(t *testing.T, roundTrip func(*http.Request) (*http.Response, error), cfg httpclient.Config) *httpclient.Client {
 	t.Helper()
-	if cfg.Name == "" {
-		cfg.Name = "test-client"
+	if cfg.Config.Name == "" {
+		cfg.Config.Name = "test-client"
 	}
-	if cfg.Observer == nil {
-		cfg.Observer = clientkit.NopObserver{}
+	if cfg.Config.Observer == nil {
+		cfg.Config.Observer = clientkit.NopObserver{}
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://example.test"

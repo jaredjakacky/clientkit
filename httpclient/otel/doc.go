@@ -16,10 +16,11 @@
 // raw errors to metrics automatically. Callers remain responsible for keeping
 // explicitly supplied metric attributes safe and low-cardinality.
 //
-// Both constructors capture applicable global OpenTelemetry providers or the
-// TextMapPropagator during construction unless explicit options are supplied.
-// Applications should configure globals first and remain responsible for SDK,
-// exporter, provider, and propagator lifecycle.
+// New captures the global TextMapPropagator. NewWithTextMapPropagator accepts
+// an explicit propagation policy. NewTransport captures applicable global
+// OpenTelemetry providers or the TextMapPropagator unless explicit transport
+// options are supplied. Applications should configure globals first and remain
+// responsible for SDK, exporter, provider, and propagator lifecycle.
 //
 // Clientkit automatically installs the logical observer and physical transport
 // instrumentation only when httpclient owns the default HTTP client and

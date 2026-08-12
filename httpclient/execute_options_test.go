@@ -19,8 +19,8 @@ func TestHTTPExecutionRetryOverrides(t *testing.T) {
 			Methods:     []string{http.MethodGet},
 		}, nil)
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{Retry: httpclient.ExecutionRetry{Disable: true}})
-		if result.Outcome != httpclient.OutcomeHTTPError || calls != 1 || len(result.Attempts) != 1 {
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{Retry: httpclient.ExecutionRetry{Disable: true}})
+		if result.Outcome != httpclient.OutcomeResponseRejected || calls != 1 || len(result.Attempts) != 1 {
 			t.Fatalf("ExecuteWithOptions() = %#v with %d calls, want one rejected attempt", result, calls)
 		}
 	})
@@ -30,7 +30,7 @@ func TestHTTPExecutionRetryOverrides(t *testing.T) {
 		calls := 0
 		client := newStatusRetryClient(t, &calls, httpclient.NoRetryConfig(), observer)
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.RetryConfig{
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{Retry: httpclient.ExecutionRetry{Config: httpclient.RetryConfig{
 			MaxAttempts: 2,
 			StatusCodes: []int{http.StatusServiceUnavailable},
 			Methods:     []string{http.MethodGet},
@@ -53,7 +53,7 @@ func TestHTTPExecutionRetryOverrides(t *testing.T) {
 			Methods:     []string{http.MethodGet},
 		}, observer)
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{})
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{})
 		if result.Outcome != httpclient.OutcomeSuccess || calls != 2 {
 			t.Fatalf("ExecuteWithOptions() = %#v with %d calls, want inherited retry success", result, calls)
 		}
@@ -72,7 +72,7 @@ func TestHTTPExecutionTimeoutOverrides(t *testing.T) {
 			Retry:                 httpclient.NoRetryConfig(),
 		})
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: 10 * time.Millisecond}})
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{Timeout: 10 * time.Millisecond}})
 		if result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout {
 			t.Fatalf("ExecuteWithOptions() = %#v, want total timeout", result)
 		}
@@ -85,7 +85,7 @@ func TestHTTPExecutionTimeoutOverrides(t *testing.T) {
 			Retry:                 httpclient.NoRetryConfig(),
 		})
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: 10 * time.Millisecond}})
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{AttemptTimeout: 10 * time.Millisecond}})
 		if result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout {
 			t.Fatalf("ExecuteWithOptions() = %#v, want attempt timeout", result)
 		}
@@ -105,7 +105,7 @@ func TestHTTPExecutionTimeoutOverrides(t *testing.T) {
 			Retry:          httpclient.NoRetryConfig(),
 		})
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-		result := client.ExecuteWithOptions(request, httpclient.DoOptions{Timeouts: httpclient.ExecutionTimeouts{DisableAttemptTimeout: true}})
+		result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{Timeouts: httpclient.ExecutionTimeouts{DisableAttemptTimeout: true}})
 		if result.Outcome != httpclient.OutcomeSuccess || result.Err != nil {
 			t.Fatalf("ExecuteWithOptions() = %#v, want success without inherited attempt timeout", result)
 		}

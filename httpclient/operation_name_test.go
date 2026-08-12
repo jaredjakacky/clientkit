@@ -27,7 +27,7 @@ func TestHTTPOperationNameValidation(t *testing.T) {
 	for _, operation := range invalid {
 		t.Run(string(operation), func(t *testing.T) {
 			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-			result := client.ExecuteWithOptions(request, httpclient.DoOptions{Operation: operation})
+			result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{Operation: operation})
 			if result.Err == nil || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 0 {
 				t.Fatalf("ExecuteWithOptions() = %#v, want pre-attempt policy failure", result)
 			}
@@ -55,7 +55,7 @@ func TestHTTPOperationNameReachesEveryLifecycleEvent(t *testing.T) {
 				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
 			}, httpclient.Config{Config: clientkit.Config{Name: "operation-name", Observer: observer}})
 			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-			result := client.ExecuteWithOptions(request, httpclient.DoOptions{Operation: test.operation})
+			result := client.ExecuteWithOptions(request, httpclient.ExecuteOptions{Operation: test.operation})
 			if result.Outcome != httpclient.OutcomeSuccess {
 				t.Fatalf("ExecuteWithOptions() = %#v, want success", result)
 			}

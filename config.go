@@ -3,7 +3,7 @@ package clientkit
 import "errors"
 
 // Config defines the protocol-neutral identity, readiness, observation, and
-// health-sanitization policy embedded by Clientkit protocol configurations.
+// health-sanitization policy included by Clientkit protocol configurations.
 type Config struct {
 	// Name is the stable, telemetry-safe logical name of the outbound client.
 	Name string

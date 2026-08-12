@@ -143,9 +143,54 @@ func TestResponseClassifierControlsExecution(t *testing.T) {
 	}
 
 	request, _ = http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
-	result = client.ExecuteWithOptions(request, httpclient.DoOptions{ResponseClassifier: httpclient.DefaultResponseClassifier()})
-	if result.Outcome != httpclient.OutcomeHTTPError || result.FailureClass != clientkit.FailureRemoteResponse || result.Err != nil {
+	result = client.ExecuteWithOptions(request, httpclient.ExecuteOptions{ResponseClassifier: httpclient.DefaultResponseClassifier()})
+	if result.Outcome != httpclient.OutcomeResponseRejected || result.FailureClass != clientkit.FailureRemoteResponse || result.Err != nil {
 		t.Fatalf("ExecuteWithOptions() = %#v, want per-call rejection", result)
+	}
+}
+
+func TestResponseClassifierFailuresUseExecutionError(t *testing.T) {
+	tests := []struct {
+		name       string
+		classifier httpclient.ResponseClassifier
+	}{
+		{
+			name: "panic",
+			classifier: httpclient.ResponseClassifierFunc(func(*http.Response) httpclient.ResponseDisposition {
+				panic("classify")
+			}),
+		},
+		{
+			name: "unsupported disposition",
+			classifier: httpclient.ResponseClassifierFunc(func(*http.Response) httpclient.ResponseDisposition {
+				return "custom"
+			}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+			}, httpclient.Config{
+				ResponseClassifier: test.classifier,
+				Retry: httpclient.RetryConfig{
+					MaxAttempts:          2,
+					Methods:              []string{http.MethodGet},
+					RetryTransportErrors: true,
+				},
+			})
+			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+			result := client.Execute(request)
+			if result.Outcome != httpclient.OutcomeExecutionError || result.FailureClass != clientkit.FailurePolicy || result.Err != nil || result.Response == nil || calls != 1 || len(result.Attempts) != 1 {
+				t.Fatalf("Execute() = %#v with %d calls, want one non-retried policy execution error", result, calls)
+			}
+			if err := result.Response.Body.Close(); err != nil {
+				t.Fatalf("Body.Close() error = %v", err)
+			}
+		})
 	}
 }
 

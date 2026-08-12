@@ -11,7 +11,7 @@ import (
 // health-check policies.
 type Config struct {
 	// Config supplies shared Clientkit identity, readiness, and observation.
-	clientkit.Config
+	Config clientkit.Config
 	// BaseURL is the required endpoint origin and optional directory path used as
 	// NewRequest's RFC 3986 resolution base. Root-relative and parent references
 	// may replace or escape that path; it is not a path-confinement boundary.

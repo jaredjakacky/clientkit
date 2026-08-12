@@ -76,7 +76,7 @@ func TestTCPDialObserverLifecycle(t *testing.T) {
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 		return connection, nil
 	}, func(config *tcpclient.Config) {
-		config.Observer = observer
+		config.Config.Observer = observer
 	})
 
 	result := client.DialResult(context.Background())
@@ -112,7 +112,7 @@ func TestCustomDialerTLSFailurePreservesOriginalObserverError(t *testing.T) {
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 		return nil, wantErr
 	}, func(config *tcpclient.Config) {
-		config.Observer = observer
+		config.Config.Observer = observer
 	})
 
 	result := client.DialResult(context.Background())
@@ -141,7 +141,7 @@ func TestTCPDialFailureObserverLifecycle(t *testing.T) {
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 		return nil, wantErr
 	}, func(config *tcpclient.Config) {
-		config.Observer = observer
+		config.Config.Observer = observer
 	})
 
 	result := client.DialResult(context.Background())
@@ -169,7 +169,7 @@ func TestTCPObserverPanicDoesNotAffectDial(t *testing.T) {
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 		return connection, nil
 	}, func(config *tcpclient.Config) {
-		config.Observer = panickingTCPObserver{NopObserver: clientkit.NopObserver{}}
+		config.Config.Observer = panickingTCPObserver{NopObserver: clientkit.NopObserver{}}
 	})
 
 	result := client.DialResult(context.Background())
@@ -184,7 +184,7 @@ func TestTCPOperationEndPanicDoesNotAffectDial(t *testing.T) {
 	client := newCustomTCPClient(t, func(context.Context, string, string) (net.Conn, error) {
 		return connection, nil
 	}, func(config *tcpclient.Config) {
-		config.Observer = endPanickingTCPObserver{NopObserver: clientkit.NopObserver{}}
+		config.Config.Observer = endPanickingTCPObserver{NopObserver: clientkit.NopObserver{}}
 	})
 
 	result := client.DialResult(context.Background())

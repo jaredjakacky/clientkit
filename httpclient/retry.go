@@ -189,11 +189,11 @@ func (cfg RetryConfig) shouldRetry(method string, outcome Outcome, statusCode in
 	}
 
 	switch outcome {
-	case OutcomeHTTPError:
+	case OutcomeResponseRejected:
 		return cfg.allowsStatusCode(statusCode)
 	case OutcomeTimeout:
 		return cfg.RetryTimeouts
-	case OutcomeTransportError:
+	case OutcomeExecutionError:
 		return cfg.RetryTransportErrors
 	default:
 		return false

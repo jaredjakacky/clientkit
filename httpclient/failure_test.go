@@ -23,12 +23,12 @@ func TestHTTPTransportFailureClassification(t *testing.T) {
 	}{
 		{name: "canceled", err: context.Canceled, outcome: httpclient.OutcomeCanceled, failure: clientkit.FailureCanceled},
 		{name: "deadline", err: context.DeadlineExceeded, outcome: httpclient.OutcomeTimeout, failure: clientkit.FailureTimeout},
-		{name: "DNS", err: &net.DNSError{Err: "missing", Name: "example.test"}, outcome: httpclient.OutcomeTransportError, failure: clientkit.FailureNameResolution},
-		{name: "refused", err: syscall.ECONNREFUSED, outcome: httpclient.OutcomeTransportError, failure: clientkit.FailureConnectionRefused},
-		{name: "reset", err: syscall.ECONNRESET, outcome: httpclient.OutcomeTransportError, failure: clientkit.FailureConnectionReset},
-		{name: "closed", err: io.EOF, outcome: httpclient.OutcomeTransportError, failure: clientkit.FailureConnectionClosed},
-		{name: "TLS", err: tls.RecordHeaderError{Msg: "invalid record"}, outcome: httpclient.OutcomeTransportError, failure: clientkit.FailureTLS},
-		{name: "other", err: errors.New("transport"), outcome: httpclient.OutcomeTransportError, failure: clientkit.FailureTransport},
+		{name: "DNS", err: &net.DNSError{Err: "missing", Name: "example.test"}, outcome: httpclient.OutcomeExecutionError, failure: clientkit.FailureNameResolution},
+		{name: "refused", err: syscall.ECONNREFUSED, outcome: httpclient.OutcomeExecutionError, failure: clientkit.FailureConnectionRefused},
+		{name: "reset", err: syscall.ECONNRESET, outcome: httpclient.OutcomeExecutionError, failure: clientkit.FailureConnectionReset},
+		{name: "closed", err: io.EOF, outcome: httpclient.OutcomeExecutionError, failure: clientkit.FailureConnectionClosed},
+		{name: "TLS", err: tls.RecordHeaderError{Msg: "invalid record"}, outcome: httpclient.OutcomeExecutionError, failure: clientkit.FailureTLS},
+		{name: "other", err: errors.New("transport"), outcome: httpclient.OutcomeExecutionError, failure: clientkit.FailureTransport},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -7,12 +7,12 @@ import (
 	"github.com/jaredjakacky/clientkit/internal/configvalue"
 )
 
-// DoOptions supplies explicit per-request response, retry, retry-safety, and
+// ExecuteOptions supplies explicit per-request response, retry, retry-safety, and
 // timeout policy. A non-nil ResponseClassifier completely overrides the client
 // classifier for this call; a zero ExecutionRetry inherits the client retry
 // policy, RetrySafetyDefault uses built-in HTTP method semantics, and zero
 // timeout fields inherit client-level values.
-type DoOptions struct {
+type ExecuteOptions struct {
 	// Operation supplies a stable, low-cardinality semantic name for this logical
 	// execution. Zero uses OperationHTTPRequest. Custom names use the restricted
 	// lowercase OperationName syntax and appear in spans, metrics, retry events,
