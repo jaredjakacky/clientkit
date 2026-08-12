@@ -7,9 +7,11 @@ GO_MODULE ?= env GOWORK=off $(GO)
 GOFMT ?= gofmt
 
 PKGS ?= ./...
-COVER_PKGS ?= $(shell $(GO_MODULE) list $(PKGS))
+EXAMPLE_PKGS ?= $(shell $(GO_MODULE) list ./examples/...)
+COVER_PKGS ?= $(shell $(GO_MODULE) list $(PKGS) | grep -v '/examples/')
 GOFILES := $(filter-out $(shell git ls-files --deleted -- '*.go'),$(shell git ls-files -- '*.go'))
 GOVULNCHECK_VERSION ?= v1.6.0
+COMPOSITION_EXAMPLE_DIR := examples/kit-series-composition
 RELEASE_CHECK_DIR := tools/releasecheck
 
 # Keep build cache inside the repo so local runs are reproducible and do not
@@ -25,6 +27,7 @@ export GOCACHE ?= $(CURDIR)/.cache/go-build
 	vet \
 	test \
 	test-race \
+	build-examples \
 	coverage \
 	root-deps-check \
 	tidy \
@@ -53,17 +56,25 @@ fmt-check: ## Verify tracked Go source files are formatted.
 vet: ## Run go vet on all packages.
 	@echo "==> vet"
 	$(GO_MODULE) vet $(PKGS)
+	$(GO_MODULE) -C $(COMPOSITION_EXAMPLE_DIR) vet ./...
 	$(GO_MODULE) -C $(RELEASE_CHECK_DIR) vet ./...
 
 test: ## Run tests for all packages.
 	@echo "==> test"
 	$(GO_MODULE) test $(PKGS)
+	$(GO_MODULE) -C $(COMPOSITION_EXAMPLE_DIR) test ./...
 	$(GO_MODULE) -C $(RELEASE_CHECK_DIR) test ./...
 
 test-race: ## Run tests with the race detector enabled.
 	@echo "==> test race"
 	$(GO_MODULE) test -race $(PKGS)
+	$(GO_MODULE) -C $(COMPOSITION_EXAMPLE_DIR) test -race ./...
 	$(GO_MODULE) -C $(RELEASE_CHECK_DIR) test -race ./...
+
+build-examples: ## Build all runnable examples without writing binaries.
+	@echo "==> building examples"
+	$(GO_MODULE) test -run '^$$' $(EXAMPLE_PKGS)
+	$(GO_MODULE) -C $(COMPOSITION_EXAMPLE_DIR) test -run '^$$' ./...
 
 coverage: ## Run library package tests with coverage output written to coverage.out.
 	@echo "==> coverage"
@@ -86,19 +97,22 @@ root-deps-check: ## Verify the root package compiles only Clientkit, Opskit, and
 tidy: ## Synchronize module files for all verified modules.
 	@echo "==> tidy"
 	$(GO_MODULE) mod tidy
+	$(GO_MODULE) -C $(COMPOSITION_EXAMPLE_DIR) mod tidy
 	$(GO_MODULE) -C $(RELEASE_CHECK_DIR) mod tidy
 
 tidy-check: ## Verify go.mod/go.sum are already tidy.
 	@echo "==> checking tidy"
 	$(GO_MODULE) mod tidy -diff
+	$(GO_MODULE) -C $(COMPOSITION_EXAMPLE_DIR) mod tidy -diff
 	$(GO_MODULE) -C $(RELEASE_CHECK_DIR) mod tidy -diff
 
 govulncheck: ## Run the pinned govulncheck tool against all verified modules.
 	@echo "==> govulncheck"
 	$(GO_MODULE) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) $(PKGS)
+	$(GO_MODULE) -C $(COMPOSITION_EXAMPLE_DIR) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 	$(GO_MODULE) -C $(RELEASE_CHECK_DIR) run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
-verify: fmt-check root-deps-check vet test tidy-check ## Run the local verification suite.
+verify: fmt-check root-deps-check vet test build-examples tidy-check ## Run the local verification suite.
 	@echo "==> verification passed"
 
 clean: ## Remove local build outputs and caches.
