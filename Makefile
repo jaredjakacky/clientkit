@@ -81,7 +81,7 @@ coverage: ## Run library package tests with coverage output written to coverage.
 	$(GO_MODULE) test -coverprofile=coverage.out $(COVER_PKGS)
 	$(GO_MODULE) tool cover -func=coverage.out | tail -1
 
-root-deps-check: ## Verify the root package compiles only Clientkit, Opskit, and the standard library.
+root-deps-check: ## Verify the root package and published module dependency boundaries.
 	@echo "==> checking root dependency boundary"
 	raw_deps="$$( $(GO_MODULE) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' . )"
 	deps="$$( printf '%s\n' "$$raw_deps" | sed '/^$$/d' | sort )"
@@ -91,6 +91,13 @@ root-deps-check: ## Verify the root package compiles only Clientkit, Opskit, and
 	if [ "$$deps" != "$$expected" ]; then
 		echo "Unexpected non-standard-library packages in the root build:"
 		printf '%s\n' "$$deps"
+		exit 1
+	fi
+	modules="$$( $(GO_MODULE) list -m -f '{{.Path}}' all )"
+	forbidden="$$( printf '%s\n' "$$modules" | grep -E '^github\.com/jaredjakacky/(configkit|dependkit|servekit|workerkit)(/|$$)' || true )"
+	if [ -n "$$forbidden" ]; then
+		echo "Clientkit's published root module graph must not include sibling domain kits:"
+		printf '%s\n' "$$forbidden"
 		exit 1
 	fi
 
