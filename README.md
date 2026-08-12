@@ -1,5 +1,10 @@
 # clientkit
 
+[![Release](https://img.shields.io/github/v/release/jaredjakacky/clientkit?sort=semver)](https://github.com/jaredjakacky/clientkit/releases)
+[![CI](https://github.com/jaredjakacky/clientkit/actions/workflows/ci.yaml/badge.svg)](https://github.com/jaredjakacky/clientkit/actions/workflows/ci.yaml)
+[![Go Support](https://img.shields.io/badge/go%20support-1.25.x%20%7C%201.26.x-00ADD8)](https://github.com/jaredjakacky/clientkit/actions/workflows/ci.yaml)
+[![License](https://img.shields.io/github/license/jaredjakacky/clientkit)](https://github.com/jaredjakacky/clientkit/blob/main/LICENSE)
+
 Clientkit provides transport-neutral identity, bounded client protocol categories, cached health, registry snapshots, and readiness integration for outbound clients.
 
 Transport implementations live in separate packages. The `httpclient` package contains the HTTP client configuration and request-oriented types, including checks, retries, attempts, results, and outcomes.

@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (Go ${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          # renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
+          - '1.25.x'
+          # renovate: datasource=custom.go-supported-latest depName=go-latest versioning=semver-coerced
+          - '1.26.x'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+
+      - name: Run full verification suite
+        run: make verify
+
+  race:
+    name: Race (Go ${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version:
+          # renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
+          - '1.25.x'
+          # renovate: datasource=custom.go-supported-latest depName=go-latest versioning=semver-coerced
+          - '1.26.x'
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+
+      - name: Run race detector
+        run: make test-race

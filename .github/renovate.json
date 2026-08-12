@@ -1,6 +1,103 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
+  "extends": ["config:recommended"],
+  "labels": ["dependencies"],
+  "dependencyDashboard": true,
+  "rangeStrategy": "replace",
+  "prConcurrentLimit": 4,
+
+  // go.dev/dl stable releases are treated as newest-first:
+  // [0] = current stable line, [1] = previous stable line
+  "customDatasources": {
+    "go-supported-latest": {
+      "defaultRegistryUrlTemplate": "https://go.dev/dl/?mode=json",
+      "format": "json",
+      "transformTemplates": [
+        "{\"releases\":[{\"version\":$replace($replace($[stable=true][0].version,/^go/,\"\"),/^(\\d+\\.\\d+)\\.\\d+$/,\"$1\")}]}"
+      ]
+    },
+    "go-supported-floor": {
+      "defaultRegistryUrlTemplate": "https://go.dev/dl/?mode=json",
+      "format": "json",
+      "transformTemplates": [
+        "{\"releases\":[{\"version\":$replace($replace($[stable=true][1].version,/^go/,\"\"),/^(\\d+\\.\\d+)\\.\\d+$/,\"$1\")}]}"
+      ]
+    }
+  },
+
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)go\\.mod$/"],
+      "matchStrings": [
+        "// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+go (?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github\\/workflows\\/.*\\.ya?ml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+- ['\"]?(?<currentValue>\\d+\\.\\d+)\\.x['\"]?",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) versioning=(?<versioning>\\S+)\\s+go-version: ['\"]?(?<currentValue>\\d+\\.\\d+)\\.x['\"]?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^README\\.md$/"],
+      "datasourceTemplate": "custom.go-supported-floor",
+      "depNameTemplate": "go-floor",
+      "versioningTemplate": "semver-coerced",
+      "matchStrings": [
+        "\\[!\\[Go Support\\]\\(https://img\\.shields\\.io/badge/go%20support-(?<currentValue>\\d+\\.\\d+)\\.x%20%7C%20\\d+\\.\\d+\\.x-[A-Za-z0-9]+\\)\\]\\(https://github\\.com/jaredjakacky/clientkit/actions/workflows/ci\\.yaml\\)"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^README\\.md$/"],
+      "datasourceTemplate": "custom.go-supported-latest",
+      "depNameTemplate": "go-latest",
+      "versioningTemplate": "semver-coerced",
+      "matchStrings": [
+        "\\[!\\[Go Support\\]\\(https://img\\.shields\\.io/badge/go%20support-\\d+\\.\\d+\\.x%20%7C%20(?<currentValue>\\d+\\.\\d+)\\.x-[A-Za-z0-9]+\\)\\]\\(https://github\\.com/jaredjakacky/clientkit/actions/workflows/ci\\.yaml\\)"
+      ]
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^Makefile$/"],
+      "datasourceTemplate": "github-tags",
+      "depNameTemplate": "golang/vuln",
+      "matchStrings": [
+        "GOVULNCHECK_VERSION \\?= (?<currentValue>\\S+)"
+      ],
+      "versioningTemplate": "semver"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["go-floor", "go-latest"],
+      "groupName": "go support window"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["digest", "minor", "patch", "pin"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Let the custom Go support policy manage setup-go versions",
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["uses-with"],
+      "matchDepNames": ["go"],
+      "enabled": false
+    },
+    {
+      "matchManagers": ["gomod"],
+      "postUpdateOptions": ["gomodTidy"]
+    },
+    {
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "go dependencies"
+    }
   ]
 }
