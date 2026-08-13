@@ -110,11 +110,16 @@ func validFailureClass(class FailureClass) bool {
 }
 
 func sanitizeHealthSafely(name string, health Health, sanitizer HealthSanitizer, disabled bool) (sanitized Health) {
+	sanitized, _ = sanitizeHealthSafelyWithPanic(name, health, sanitizer, disabled)
+	return sanitized
+}
+
+func sanitizeHealthSafelyWithPanic(name string, health Health, sanitizer HealthSanitizer, disabled bool) (sanitized Health, panicked bool) {
 	if sanitizer == nil && !disabled {
 		sanitizer = DefaultHealthSanitizer
 	}
 	if sanitizer == nil {
-		return health
+		return health, false
 	}
 	defer func() {
 		if recover() != nil {
@@ -123,9 +128,10 @@ func sanitizeHealthSafely(name string, health Health, sanitizer HealthSanitizer,
 				FailureClass: FailurePolicy,
 				Message:      "client health sanitizer failed",
 			}
+			panicked = true
 		}
 	}()
-	return sanitizer(name, health)
+	return sanitizer(name, health), false
 }
 
 func boundedHealthMessage(message string) string {

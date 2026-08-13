@@ -286,19 +286,35 @@ func TestHTTPExecuteRejectsLateTransportResults(t *testing.T) {
 
 func TestHTTPExecuteRejectsLateSuccessAfterCallerHTTPClientTimeout(t *testing.T) {
 	body := &trackedReadCloser{Reader: strings.NewReader("late")}
-	client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
-		<-request.Context().Done()
+	configuredHTTPClient := &http.Client{Timeout: 10 * time.Millisecond}
+	configuredHTTPClient.Transport = testRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		select {
+		case <-request.Context().Done():
+		case <-time.After(100 * time.Millisecond):
+		}
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: request}, nil
-	}, httpclient.Config{
-		HTTPClient:            &http.Client{Timeout: 10 * time.Millisecond},
+	})
+	client, err := httpclient.New(httpclient.Config{
+		Config:                clientkit.Config{Name: "caller-timeout", Observer: clientkit.NopObserver{}},
+		BaseURL:               "https://example.test",
+		HTTPClient:            configuredHTTPClient,
+		Propagator:            httpclient.NopHeaderPropagator{},
 		DisableTimeout:        true,
 		DisableAttemptTimeout: true,
 		Retry:                 httpclient.NoRetryConfig(),
 	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	configuredHTTPClient.Timeout = 0
+
 	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
 	result := client.Execute(request)
+	if result.Response != nil {
+		defer result.Response.Body.Close()
+	}
 	if result.Response != nil || result.Outcome != httpclient.OutcomeTimeout || result.FailureClass != clientkit.FailureTimeout || !errors.Is(result.Err, context.DeadlineExceeded) {
-		t.Fatalf("Execute() = %#v, want caller HTTP client timeout", result)
+		t.Fatalf("Execute() = %#v, want construction-time caller HTTP client timeout", result)
 	}
 	if !body.closed {
 		t.Fatal("late response after caller HTTP client timeout was not closed")
@@ -419,6 +435,46 @@ func TestHTTPConfiguredRedirectPolicy(t *testing.T) {
 		result := client.Execute(request)
 		if result.Outcome != httpclient.OutcomeExecutionError || !errors.Is(result.Err, rejection) || result.FailureClass != clientkit.FailurePolicy || len(result.Attempts) != 1 || calls != 1 {
 			t.Fatalf("Execute() = %#v with %d calls, want non-retried redirect policy failure", result, calls)
+		}
+	})
+
+	t.Run("construction-time callback is retained", func(t *testing.T) {
+		rejection := errors.New("construction-time redirect rejection")
+		configuredChecks := 0
+		replacementChecks := 0
+		calls := 0
+		configuredHTTPClient := &http.Client{
+			Transport: testRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return redirectResponse(request), nil
+				}
+				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+			}),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				configuredChecks++
+				return rejection
+			},
+		}
+		client, err := httpclient.New(httpclient.Config{
+			Config:     clientkit.Config{Name: "redirect-snapshot", Observer: clientkit.NopObserver{}},
+			BaseURL:    "https://example.test",
+			HTTPClient: configuredHTTPClient,
+			Propagator: httpclient.NopHeaderPropagator{},
+			Retry:      httpclient.NoRetryConfig(),
+		})
+		if err != nil {
+			t.Fatalf("New() error = %v", err)
+		}
+		configuredHTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+			replacementChecks++
+			return nil
+		}
+
+		request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
+		result := client.Execute(request)
+		if result.Response == nil || result.Outcome != httpclient.OutcomeExecutionError || result.FailureClass != clientkit.FailurePolicy || !errors.Is(result.Err, rejection) || calls != 1 || configuredChecks != 1 || replacementChecks != 0 {
+			t.Fatalf("Execute() = %#v with calls/checks %d/%d/%d, want construction-time redirect rejection", result, calls, configuredChecks, replacementChecks)
 		}
 	})
 

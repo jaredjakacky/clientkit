@@ -3,7 +3,9 @@ package httpclient
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,9 +49,19 @@ func TestHTTPTransportInstrumentationRespectsOwnershipAndExplicitObservation(t *
 		}
 	})
 
-	t.Run("caller-owned HTTP client is not mutated", func(t *testing.T) {
+	t.Run("caller-owned HTTP client is shallow-snapshotted", func(t *testing.T) {
 		transport := http.DefaultTransport
-		httpClient := &http.Client{Transport: transport}
+		jar := &internalCookieJar{}
+		redirectChecks := 0
+		httpClient := &http.Client{
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				redirectChecks++
+				return nil
+			},
+			Jar:     jar,
+			Timeout: time.Second,
+		}
 		client, err := New(Config{
 			Config:     clientkit.Config{Name: "caller-owned"},
 			BaseURL:    "https://example.test",
@@ -61,8 +73,35 @@ func TestHTTPTransportInstrumentationRespectsOwnershipAndExplicitObservation(t *
 		if client.transportInjects {
 			t.Fatal("caller-owned HTTP client unexpectedly marked transport as Clientkit-instrumented")
 		}
-		if client.httpClient != httpClient || httpClient.Transport != transport {
-			t.Fatal("New() replaced or mutated the caller-owned HTTP client")
+		if client.httpClient == httpClient {
+			t.Fatal("New() retained the caller-owned HTTP client pointer")
+		}
+		if client.httpClient.Transport != transport || client.httpClient.Jar != jar || client.httpClient.Timeout != time.Second {
+			t.Fatalf("private HTTP client = %#v, want construction-time top-level fields", client.httpClient)
+		}
+		if httpClient.Transport != transport || httpClient.Jar != jar || httpClient.Timeout != time.Second {
+			t.Fatalf("caller-owned HTTP client = %#v, want unchanged", httpClient)
+		}
+		if err := client.httpClient.CheckRedirect(nil, nil); err != nil || redirectChecks != 1 {
+			t.Fatalf("private CheckRedirect() = %v with %d calls, want construction-time callback", err, redirectChecks)
+		}
+
+		replacementTransport := &http.Transport{}
+		replacementJar := &internalCookieJar{}
+		replacementRedirectChecks := 0
+		httpClient.Transport = replacementTransport
+		httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+			replacementRedirectChecks++
+			return nil
+		}
+		httpClient.Jar = replacementJar
+		httpClient.Timeout = 2 * time.Second
+
+		if client.httpClient.Transport != transport || client.httpClient.Jar != jar || client.httpClient.Timeout != time.Second {
+			t.Fatalf("private HTTP client after caller mutation = %#v, want construction-time top-level fields", client.httpClient)
+		}
+		if err := client.httpClient.CheckRedirect(nil, nil); err != nil || redirectChecks != 2 || replacementRedirectChecks != 0 {
+			t.Fatalf("private CheckRedirect() after caller mutation = %v with calls %d/%d, want construction-time callback", err, redirectChecks, replacementRedirectChecks)
 		}
 	})
 }
@@ -73,21 +112,104 @@ func TestHTTPClientClosesIdleConnectionsThroughInstrumentation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewTransport() error = %v", err)
 	}
+	configuredHTTPClient := &http.Client{Transport: instrumented}
 	client, err := New(Config{
 		Config:     clientkit.Config{Name: "idle-cleanup", Observer: clientkit.NopObserver{}},
 		BaseURL:    "https://example.test",
-		HTTPClient: &http.Client{Transport: instrumented},
+		HTTPClient: configuredHTTPClient,
 		Propagator: NopHeaderPropagator{},
 		Retry:      NoRetryConfig(),
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	replacement := &internalIdleClosingTransport{}
+	configuredHTTPClient.Transport = replacement
 	client.CloseIdleConnections()
 	if base.closeCalls != 1 {
 		t.Fatalf("CloseIdleConnections calls = %d, want 1", base.closeCalls)
 	}
+	if replacement.closeCalls != 0 {
+		t.Fatalf("replacement CloseIdleConnections calls = %d, want 0", replacement.closeCalls)
+	}
 }
+
+func TestHTTPCallerClientMutationIsRaceIsolated(t *testing.T) {
+	transportA := internalRoundTripperFunc(successfulInternalHTTPRoundTrip)
+	transportB := internalRoundTripperFunc(successfulInternalHTTPRoundTrip)
+	jarA := &internalCookieJar{}
+	jarB := &internalCookieJar{}
+	configuredHTTPClient := &http.Client{
+		Transport:     transportA,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return nil },
+		Jar:           jarA,
+	}
+	client, err := New(Config{
+		Config:                clientkit.Config{Name: "caller-mutation", Observer: clientkit.NopObserver{}},
+		BaseURL:               "https://example.test",
+		HTTPClient:            configuredHTTPClient,
+		Propagator:            NopHeaderPropagator{},
+		DisableTimeout:        true,
+		DisableAttemptTimeout: true,
+		Retry:                 NoRetryConfig(),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		for range 250 {
+			request, requestErr := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+			if requestErr != nil {
+				return
+			}
+			result := client.Execute(request)
+			if result.Response != nil {
+				_ = result.Response.Body.Close()
+			}
+		}
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		for index := range 250 {
+			if index%2 == 0 {
+				configuredHTTPClient.Transport = transportB
+				configuredHTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+				configuredHTTPClient.Jar = jarB
+				configuredHTTPClient.Timeout = time.Second
+				continue
+			}
+			configuredHTTPClient.Transport = transportA
+			configuredHTTPClient.CheckRedirect = func(*http.Request, []*http.Request) error { return nil }
+			configuredHTTPClient.Jar = jarA
+			configuredHTTPClient.Timeout = 0
+		}
+	}()
+	close(start)
+	wait.Wait()
+}
+
+type internalRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn internalRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func successfulInternalHTTPRoundTrip(request *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+}
+
+type internalCookieJar struct{}
+
+func (*internalCookieJar) Cookies(*url.URL) []*http.Cookie { return nil }
+
+func (*internalCookieJar) SetCookies(*url.URL, []*http.Cookie) {}
 
 type internalIdleClosingTransport struct {
 	closeCalls int

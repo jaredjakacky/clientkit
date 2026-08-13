@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/jaredjakacky/opskit"
 )
@@ -53,9 +54,16 @@ type registeredClientEntry struct {
 	protocol           string
 	policy             ReadinessPolicy
 	healthCheckEnabled bool
+	syntheticHealth    *registryHealthOverride
 	// checkSlot serializes active checks for this client across overlapping
-	// CheckAll calls without holding the registry mutex during user code.
+	// CheckAll calls through result publication without holding the registry mutex
+	// during user code.
 	checkSlot chan struct{}
+}
+
+type registryHealthOverride struct {
+	health    Health
+	decidedAt time.Time
 }
 
 type validatedRegistration struct {
@@ -457,9 +465,10 @@ func (r *Registry) Get(name string) (RegisteredClient, bool) {
 	return entry.client, true
 }
 
-// Snapshot returns registered clients in deterministic name order using
-// passive health reads and the registry's sanitization policy. It never
-// executes health checks.
+// Snapshot returns registered clients in deterministic name order using passive
+// health reads and the registry's sanitization policy. A newer client-specific
+// failure synthesized by CheckAll is projected over older client-owned health
+// until a later assessment supersedes it. Snapshot never executes health checks.
 func (r *Registry) Snapshot() RegistrySnapshot {
 	if r == nil {
 		return RegistrySnapshot{}
@@ -474,11 +483,17 @@ func (r *Registry) Snapshot() RegistrySnapshot {
 
 	clients := make([]ClientSnapshot, 0, len(entries))
 	for _, namedClient := range entries {
+		health := registeredClientHealth(namedClient.entry.client)
+		if override := namedClient.entry.syntheticHealth; override != nil && !health.CheckedAt.After(override.decidedAt) {
+			health = override.health
+		} else {
+			health = r.sanitizeHealth(namedClient.name, health)
+		}
 		clients = append(clients, ClientSnapshot{
 			Name:            namedClient.name,
 			Protocol:        namedClient.entry.protocol,
 			ReadinessPolicy: namedClient.entry.policy,
-			Health:          r.sanitizeHealth(namedClient.name, registeredClientHealth(namedClient.entry.client)),
+			Health:          health,
 		})
 	}
 
@@ -492,10 +507,41 @@ func (r *Registry) Snapshot() RegistrySnapshot {
 }
 
 func (r *Registry) sanitizeHealth(name string, health Health) (sanitized Health) {
+	sanitized, _ = r.sanitizeHealthWithPanic(name, health)
+	return sanitized
+}
+
+func (r *Registry) sanitizeHealthWithPanic(name string, health Health) (sanitized Health, panicked bool) {
 	if r == nil {
-		return DefaultHealthSanitizer(name, health)
+		return sanitizeHealthSafelyWithPanic(name, health, DefaultHealthSanitizer, false)
 	}
-	return sanitizeHealthSafely(name, health, r.healthSanitizer, r.disableHealthSanitizer)
+	return sanitizeHealthSafelyWithPanic(name, health, r.healthSanitizer, r.disableHealthSanitizer)
+}
+
+func (r *Registry) applyHealthCheckOutcome(name string, health Health, decidedAt time.Time, synthetic bool) {
+	if r == nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.clients[name]
+	if !ok {
+		return
+	}
+	if entry.syntheticHealth != nil && decidedAt.Before(entry.syntheticHealth.decidedAt) {
+		return
+	}
+	if synthetic {
+		entry.syntheticHealth = &registryHealthOverride{
+			health:    health,
+			decidedAt: decidedAt,
+		}
+	} else {
+		entry.syntheticHealth = nil
+	}
+	r.clients[name] = entry
 }
 
 func registeredClientHealth(client RegisteredClient) (health Health) {

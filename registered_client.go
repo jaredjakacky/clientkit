@@ -26,7 +26,9 @@ type RegisteredClient interface {
 // HealthChecker actively refreshes client health. Implementations must be safe
 // for concurrent calls and honor context cancellation cooperatively. For an
 // enabled check, Check must make its returned assessment subsequently visible
-// through Health before it returns.
+// through Health before it returns. Registry may retain a newer synthetic
+// failure for its own passive projections when Check panics or Registry rejects
+// a result; it does not mutate the client-owned cache.
 type HealthChecker interface {
 	RegisteredClient
 	// Check actively assesses the dependency and updates cached health.
@@ -67,7 +69,9 @@ type ClientSnapshot struct {
 	Protocol string `json:"protocol"`
 	// ReadinessPolicy is the policy captured during registration.
 	ReadinessPolicy ReadinessPolicy `json:"readiness_policy"`
-	// Health is the client's effective cached health at snapshot time.
+	// Health is the producer's effective health at snapshot time. Registry
+	// snapshots may project a newer Registry-synthesized check failure over the
+	// client-owned cache.
 	Health Health `json:"health"`
 }
 

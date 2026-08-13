@@ -219,9 +219,11 @@ well as `Request.Host` overrides. Enabling cross-origin execution may forward
 caller-supplied headers or permit an HTTPS downgrade and should be paired with a
 restrictive redirect policy.
 
-A caller-supplied `*http.Client` remains caller-owned and is never mutated.
-Clientkit copies its value to compose execution policy. Calling
-`CloseIdleConnections` may affect other users when its transport is shared.
+A caller-supplied `*http.Client` remains caller-owned and is never mutated or
+retained. Clientkit shallow-copies its top-level value during construction, so
+later field assignments do not change Clientkit behavior. Referenced transports,
+jars, and callback state remain shared. Calling `CloseIdleConnections` may
+affect other users when the construction-time transport is shared.
 
 ## Health and cached readiness
 
@@ -229,6 +231,11 @@ Protocol checks are disabled by default. `Check` and `Registry.CheckAll` are the
 active operations that may contact dependencies. `Health`, `Snapshot`,
 `Status`, `Readiness`, and `Inspect` only project cached state and never perform
 synchronous dependency I/O.
+
+Registered clients own ordinary cached health. When `Registry.CheckAll` must
+synthesize a client-specific failure that the client cannot cache, Registry
+passive projections retain that exceptional result until a later client-owned
+assessment supersedes it.
 
 Clientkit creates no scheduler or background goroutine. Applications may run
 checks directly or use Workerkit to periodically execute the Registry's Opskit

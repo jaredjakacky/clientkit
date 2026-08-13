@@ -41,7 +41,8 @@ var (
 // New validates and constructs an HTTP client without performing network I/O.
 // Nil HTTPClient, Observer, Propagator, and ResponseClassifier fields select
 // their documented production defaults. Health checks remain disabled unless
-// Check.Enabled is true.
+// Check.Enabled is true. A non-nil HTTPClient is shallow-copied; its referenced
+// transport, jar, and callback state remain shared and caller-owned.
 func New(cfg Config) (*Client, error) {
 	if err := cfg.Config.Validate(); err != nil {
 		return nil, err
@@ -111,6 +112,9 @@ func New(cfg Config) (*Client, error) {
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
 		httpClient = DefaultHTTPClient()
+	} else {
+		copiedHTTPClient := *httpClient
+		httpClient = &copiedHTTPClient
 	}
 
 	baseConfig := cfg.Config
@@ -189,11 +193,11 @@ func (c *Client) ReadinessPolicy() clientkit.ReadinessPolicy {
 // permanently close this Client, or prevent future requests and health checks
 // from opening new connections. A nil or unusable Client is a no-op.
 //
-// This explicit call also applies to a caller-supplied HTTP client. If that
-// client or its transport is shared, other users of the same idle pool may be
-// affected. Clientkit neither detects that sharing nor claims ownership, and it
-// never performs this cleanup automatically. Applications own active-work
-// draining and shutdown ordering.
+// This explicit call also applies to the construction-time transport of a
+// caller-supplied HTTP client. If that transport is shared, other users of the
+// same idle pool may be affected. Clientkit neither detects that sharing nor
+// claims ownership, and it never performs this cleanup automatically.
+// Applications own active-work draining and shutdown ordering.
 //
 // Individual cleanup can be requested directly:
 //

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -92,6 +93,56 @@ func TestHTTPClientOriginPolicy(t *testing.T) {
 	}
 }
 
+func TestHTTPClientUsesConstructionTimeTransportAndJar(t *testing.T) {
+	transportCalls := 0
+	replacementTransportCalls := 0
+	requestCookie := ""
+	transport := testRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		transportCalls++
+		if cookie, err := request.Cookie("snapshot"); err == nil {
+			requestCookie = cookie.Value
+		}
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Header:     http.Header{"Set-Cookie": []string{"received=yes; Path=/"}},
+			Body:       http.NoBody,
+			Request:    request,
+		}, nil
+	})
+	replacementTransport := testRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		replacementTransportCalls++
+		return &http.Response{StatusCode: http.StatusInternalServerError, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+	})
+	jar := &recordingCookieJar{value: "construction"}
+	replacementJar := &recordingCookieJar{value: "replacement"}
+	configuredHTTPClient := &http.Client{Transport: transport, Jar: jar}
+	client, err := httpclient.New(httpclient.Config{
+		Config:     clientkit.Config{Name: "ownership", Observer: clientkit.NopObserver{}},
+		BaseURL:    "https://example.test",
+		HTTPClient: configuredHTTPClient,
+		Propagator: httpclient.NopHeaderPropagator{},
+		Retry:      httpclient.NoRetryConfig(),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	configuredHTTPClient.Transport = replacementTransport
+	configuredHTTPClient.Jar = replacementJar
+
+	request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
+	result := client.Execute(request)
+	if result.Response != nil {
+		_ = result.Response.Body.Close()
+	}
+	if result.Outcome != httpclient.OutcomeSuccess || result.Err != nil || transportCalls != 1 || replacementTransportCalls != 0 {
+		t.Fatalf("Execute() = %#v with transport calls %d/%d, want construction-time transport success", result, transportCalls, replacementTransportCalls)
+	}
+	if requestCookie != "construction" || jar.cookieCalls != 1 || jar.setCalls != 1 || replacementJar.cookieCalls != 0 || replacementJar.setCalls != 0 {
+		t.Fatalf("cookie behavior = value %q, construction calls %d/%d, replacement calls %d/%d", requestCookie, jar.cookieCalls, jar.setCalls, replacementJar.cookieCalls, replacementJar.setCalls)
+	}
+}
+
 func TestHTTPClientAccessorsAndIdleCleanup(t *testing.T) {
 	transport := &closingRoundTripper{}
 	client, err := httpclient.New(httpclient.Config{
@@ -143,4 +194,19 @@ func (*closingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 
 func (t *closingRoundTripper) CloseIdleConnections() {
 	t.closeCalls++
+}
+
+type recordingCookieJar struct {
+	value       string
+	cookieCalls int
+	setCalls    int
+}
+
+func (jar *recordingCookieJar) Cookies(*url.URL) []*http.Cookie {
+	jar.cookieCalls++
+	return []*http.Cookie{{Name: "snapshot", Value: jar.value}}
+}
+
+func (jar *recordingCookieJar) SetCookies(*url.URL, []*http.Cookie) {
+	jar.setCalls++
 }
