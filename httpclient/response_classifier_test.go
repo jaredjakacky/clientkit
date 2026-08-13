@@ -177,9 +177,9 @@ func TestResponseClassifierFailuresUseExecutionError(t *testing.T) {
 			}, httpclient.Config{
 				ResponseClassifier: test.classifier,
 				Retry: httpclient.RetryConfig{
-					MaxAttempts:          2,
-					Methods:              []string{http.MethodGet},
-					RetryTransportErrors: true,
+					MaxAttempts:     2,
+					Methods:         []string{http.MethodGet},
+					TransportErrors: httpclient.TransportRetryAll,
 				},
 			})
 			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)

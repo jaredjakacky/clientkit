@@ -24,6 +24,11 @@ import (
 
 const InstrumentationScope = "github.com/jaredjakacky/clientkit/httpclient/otel"
 
+// ErrInvalidTransportResult identifies a RoundTripper that returned neither a
+// response nor an error. It is internal shared policy between HTTP execution
+// and its default transport instrumentation.
+var ErrInvalidTransportResult = errors.New("clientkit: HTTP transport returned no response and no error")
+
 // Config configures Clientkit's narrow per-RoundTrip OpenTelemetry adapter.
 type Config struct {
 	TracerProvider          trace.TracerProvider
@@ -157,7 +162,7 @@ func (t *Transport) RoundTrip(request *http.Request) (*http.Response, error) {
 		}
 	}
 	if response == nil && err == nil {
-		err = errors.New("clientkit: HTTP transport returned no response and no error")
+		err = ErrInvalidTransportResult
 	}
 	endedAt := time.Now()
 	endAttributes, errorType, failed := responseAttributes(response, err)

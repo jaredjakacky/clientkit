@@ -2,10 +2,18 @@ package httpclient_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"io"
+	"log"
 	"math"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"reflect"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +29,8 @@ func TestHTTPRetryDefaultsAreIndependent(t *testing.T) {
 		first.BackoffMultiplier != httpclient.DefaultRetryBackoffMultiplier ||
 		first.MaxBackoff != httpclient.DefaultRetryMaxBackoff ||
 		first.Jitter != httpclient.DefaultRetryJitter ||
+		first.TransportErrors != httpclient.TransportRetryDefault ||
+		!first.RetryTimeouts ||
 		first.RespectRetryAfter != httpclient.DefaultRespectRetryAfter ||
 		first.MaxRetryAfter != httpclient.DefaultMaxRetryAfter {
 		t.Fatalf("DefaultRetryConfig() = %#v, want documented defaults", first)
@@ -63,6 +73,7 @@ func TestHTTPRetryConfigValidation(t *testing.T) {
 		{name: "blank method", retry: httpclient.RetryConfig{MaxAttempts: 1, Methods: []string{" "}}},
 		{name: "invalid method", retry: httpclient.RetryConfig{MaxAttempts: 1, Methods: []string{"GET\n"}}},
 		{name: "duplicate method", retry: httpclient.RetryConfig{MaxAttempts: 1, Methods: []string{http.MethodGet, http.MethodGet}}},
+		{name: "invalid transport retry mode", retry: httpclient.RetryConfig{MaxAttempts: 1, TransportErrors: "invalid"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -75,40 +86,140 @@ func TestHTTPRetryConfigValidation(t *testing.T) {
 	}
 }
 
-func TestHTTPRetriesConfiguredTransportFailures(t *testing.T) {
+func TestHTTPTransportRetryModes(t *testing.T) {
+	certificate := &x509.Certificate{DNSNames: []string{"service.internal"}}
+	unknownAuthority := &tls.CertificateVerificationError{
+		UnverifiedCertificates: []*x509.Certificate{certificate},
+		Err:                    x509.UnknownAuthorityError{Cert: certificate},
+	}
+	hostnameMismatch := &tls.CertificateVerificationError{
+		UnverifiedCertificates: []*x509.Certificate{certificate},
+		Err:                    x509.HostnameError{Certificate: certificate, Host: "api.example.test"},
+	}
+
 	tests := []struct {
-		name                 string
-		firstErr             error
-		retryTransportErrors bool
-		retryTimeouts        bool
-		wantAttempts         int
-		wantOutcome          httpclient.Outcome
+		name            string
+		firstErr        error
+		invalidResult   bool
+		transportErrors httpclient.TransportRetryMode
+		retryTimeouts   bool
+		wantAttempts    int
+		wantOutcome     httpclient.Outcome
+		wantFailure     clientkit.FailureClass
 	}{
-		{name: "transport retry", firstErr: errors.New("transport unavailable"), retryTransportErrors: true, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess},
-		{name: "transport disabled", firstErr: errors.New("transport unavailable"), wantAttempts: 1, wantOutcome: httpclient.OutcomeExecutionError},
-		{name: "timeout retry", firstErr: retryTimeoutError{}, retryTimeouts: true, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess},
-		{name: "timeout disabled", firstErr: retryTimeoutError{}, wantAttempts: 1, wantOutcome: httpclient.OutcomeTimeout},
-		{name: "cancellation is never retried", firstErr: context.Canceled, retryTransportErrors: true, retryTimeouts: true, wantAttempts: 1, wantOutcome: httpclient.OutcomeCanceled},
+		{name: "default certificate verification", firstErr: unknownAuthority, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 1, wantOutcome: httpclient.OutcomeExecutionError, wantFailure: clientkit.FailureTLS},
+		{name: "all certificate verification", firstErr: unknownAuthority, transportErrors: httpclient.TransportRetryAll, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureTLS},
+		{name: "default hostname verification", firstErr: hostnameMismatch, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 1, wantOutcome: httpclient.OutcomeExecutionError, wantFailure: clientkit.FailureTLS},
+		{name: "default DNS not found", firstErr: &net.DNSError{Err: "no such host", Name: "missing.example.test", IsNotFound: true}, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 1, wantOutcome: httpclient.OutcomeExecutionError, wantFailure: clientkit.FailureNameResolution},
+		{name: "all DNS not found", firstErr: &net.DNSError{Err: "no such host", Name: "missing.example.test", IsNotFound: true}, transportErrors: httpclient.TransportRetryAll, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureNameResolution},
+		{name: "default temporary DNS", firstErr: &net.DNSError{Err: "server misbehaving", Name: "example.test", IsTemporary: true}, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureNameResolution},
+		{name: "default unknown DNS", firstErr: &net.DNSError{Err: "resolver unavailable", Name: "example.test"}, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureNameResolution},
+		{name: "default connection refused", firstErr: &net.OpError{Op: "dial", Net: "tcp", Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}}, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureConnectionRefused},
+		{name: "default connection reset", firstErr: syscall.ECONNRESET, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureConnectionReset},
+		{name: "default EOF", firstErr: io.EOF, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureConnectionClosed},
+		{name: "default unexpected EOF", firstErr: io.ErrUnexpectedEOF, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureConnectionClosed},
+		{name: "default closed network", firstErr: net.ErrClosed, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureConnectionClosed},
+		{name: "default broken pipe", firstErr: syscall.EPIPE, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureConnectionClosed},
+		{name: "default generic transport", firstErr: errors.New("transport unavailable"), transportErrors: httpclient.TransportRetryDefault, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureTransport},
+		{name: "none generic transport", firstErr: errors.New("transport unavailable"), wantAttempts: 1, wantOutcome: httpclient.OutcomeExecutionError, wantFailure: clientkit.FailureTransport},
+		{name: "default invalid transport result", invalidResult: true, transportErrors: httpclient.TransportRetryDefault, wantAttempts: 1, wantOutcome: httpclient.OutcomeExecutionError, wantFailure: clientkit.FailureTransport},
+		{name: "all invalid transport result", invalidResult: true, transportErrors: httpclient.TransportRetryAll, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureTransport},
+		{name: "DNS timeout enabled", firstErr: &net.DNSError{Err: "lookup timed out", Name: "example.test", IsTimeout: true}, transportErrors: httpclient.TransportRetryNone, retryTimeouts: true, wantAttempts: 2, wantOutcome: httpclient.OutcomeSuccess, wantFailure: clientkit.FailureTimeout},
+		{name: "DNS timeout disabled", firstErr: &net.DNSError{Err: "lookup timed out", Name: "example.test", IsTimeout: true}, transportErrors: httpclient.TransportRetryAll, wantAttempts: 1, wantOutcome: httpclient.OutcomeTimeout, wantFailure: clientkit.FailureTimeout},
+		{name: "cancellation is never retried", firstErr: context.Canceled, transportErrors: httpclient.TransportRetryAll, retryTimeouts: true, wantAttempts: 1, wantOutcome: httpclient.OutcomeCanceled, wantFailure: clientkit.FailureCanceled},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			observer := &httpAttributeObserver{}
 			calls := 0
 			client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
 				calls++
 				if calls == 1 {
+					if test.invalidResult {
+						return nil, nil
+					}
 					return nil, test.firstErr
 				}
 				return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
-			}, httpclient.Config{Retry: httpclient.RetryConfig{
-				MaxAttempts:          2,
-				Methods:              []string{http.MethodGet},
-				RetryTransportErrors: test.retryTransportErrors,
-				RetryTimeouts:        test.retryTimeouts,
+			}, httpclient.Config{Config: clientkit.Config{Name: "transport-retry", Observer: observer}, Retry: httpclient.RetryConfig{
+				MaxAttempts:     2,
+				Methods:         []string{http.MethodGet},
+				TransportErrors: test.transportErrors,
+				RetryTimeouts:   test.retryTimeouts,
 			}})
 			request, _ := http.NewRequest(http.MethodGet, "https://example.test/resource", nil)
 			result := client.Execute(request)
 			if calls != test.wantAttempts || len(result.Attempts) != test.wantAttempts || result.Outcome != test.wantOutcome {
 				t.Fatalf("Execute() = %#v with %d calls, want %d attempts and %q", result, calls, test.wantAttempts, test.wantOutcome)
+			}
+			if result.Attempts[0].FailureClass != test.wantFailure || len(observer.attempts) != test.wantAttempts || len(observer.retries) != test.wantAttempts-1 || observer.end.Attempts != test.wantAttempts || observer.end.Outcome != string(test.wantOutcome) {
+				t.Fatalf("attempt/observer state = (%#v, %#v), want first failure %q and %d attempts", result.Attempts, observer, test.wantFailure, test.wantAttempts)
+			}
+			if test.wantAttempts == 1 && result.FailureClass != test.wantFailure {
+				t.Fatalf("final failure = %q, want %q", result.FailureClass, test.wantFailure)
+			}
+			if test.wantAttempts == 2 && observer.retries[0].FailureClass != test.wantFailure {
+				t.Fatalf("retry failure = %q, want %q", observer.retries[0].FailureClass, test.wantFailure)
+			}
+		})
+	}
+}
+
+func TestHTTPDefaultTransportDoesNotRetryTLSVerificationFailures(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server.Config.ErrorLog = log.New(io.Discard, "", 0)
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	tests := []struct {
+		name         string
+		httpClient   *http.Client
+		wantHostname bool
+	}{
+		{name: "unknown authority"},
+		{
+			name: "hostname mismatch",
+			httpClient: func() *http.Client {
+				roots := x509.NewCertPool()
+				roots.AddCert(server.Certificate())
+				transport := httpclient.DefaultTransport()
+				transport.TLSClientConfig = &tls.Config{RootCAs: roots, ServerName: "wrong.example.test"}
+				return &http.Client{Transport: transport}
+			}(),
+			wantHostname: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := httpclient.New(httpclient.Config{
+				Config:     clientkit.Config{Name: "tls-retry", Observer: clientkit.NopObserver{}},
+				BaseURL:    server.URL,
+				HTTPClient: test.httpClient,
+				Propagator: httpclient.NopHeaderPropagator{},
+			})
+			if err != nil {
+				t.Fatalf("httpclient.New() error = %v", err)
+			}
+			request, _ := http.NewRequest(http.MethodGet, server.URL, nil)
+			result := client.Execute(request)
+			if result.Outcome != httpclient.OutcomeExecutionError || result.FailureClass != clientkit.FailureTLS || len(result.Attempts) != 1 || result.Err == nil {
+				t.Fatalf("Execute() = %#v, want one TLS failure", result)
+			}
+			var verificationError *tls.CertificateVerificationError
+			if !errors.As(result.Err, &verificationError) {
+				t.Fatalf("Execute() error = %v, want certificate verification error", result.Err)
+			}
+			if test.wantHostname {
+				var cause x509.HostnameError
+				if !errors.As(result.Err, &cause) {
+					t.Fatalf("Execute() error = %v, want hostname mismatch", result.Err)
+				}
+			} else {
+				var cause x509.UnknownAuthorityError
+				if !errors.As(result.Err, &cause) {
+					t.Fatalf("Execute() error = %v, want unknown authority", result.Err)
+				}
 			}
 		})
 	}

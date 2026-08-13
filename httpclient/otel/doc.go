@@ -2,7 +2,7 @@
 // per-RoundTrip transport instrumentation.
 //
 // New constructs only a HeaderPropagator. NewTransport wraps an
-// http.RoundTripper and creates one CLIENT span for each physical RoundTrip,
+// http.RoundTripper and creates one CLIENT span for each RoundTrip invocation,
 // including redirects and Clientkit retries. It injects trace context from that
 // attempt span and ends the span when response headers or a transport error are
 // available; response-body reads and closes do not alter the span.

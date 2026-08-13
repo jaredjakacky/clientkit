@@ -108,6 +108,99 @@ func TestTransportCreatesOneClientSpanAndInjectsItsContextPerRoundTrip(t *testin
 	}
 }
 
+func TestTransportObservesRedirectRoundTripsWithinOneExecutionAttempt(t *testing.T) {
+	t.Run("followed method-preserving redirect", func(t *testing.T) {
+		traces := newTestTracerProvider()
+		calls := 0
+		transport, err := NewTransport(roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return &http.Response{
+					StatusCode: http.StatusTemporaryRedirect,
+					Header:     http.Header{"Location": []string{"/final"}},
+					Body:       http.NoBody,
+					Request:    request,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusNoContent,
+				Header:     make(http.Header),
+				Body:       http.NoBody,
+				Request:    request,
+			}, nil
+		}), Config{TracerProvider: traces})
+		if err != nil {
+			t.Fatalf("NewTransport() error = %v", err)
+		}
+		ctx := WithExecutionAttempt(WithOperation(context.Background(), "payments", "payments.create"), 1)
+		request, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.test/start", strings.NewReader("payload"))
+		response, err := (&http.Client{Transport: transport}).Do(request)
+		if err != nil || response == nil || response.StatusCode != http.StatusNoContent || calls != 2 {
+			t.Fatalf("Client.Do() = (%v, %v) with %d calls, want followed redirect", response, err, calls)
+		}
+		_ = response.Body.Close()
+
+		spans := traces.spans()
+		if len(spans) != 2 {
+			t.Fatalf("span count = %d, want two redirect RoundTrips", len(spans))
+		}
+		for index, span := range spans {
+			if span.name != http.MethodPost || intAttribute(span.attributes, clientkitotel.AttributeAttemptNumber) != 1 {
+				t.Fatalf("span %d = %#v, want POST in execution attempt 1", index, span)
+			}
+			resend, found := findAttribute(span.attributes, semconv.HTTPRequestResendCountKey)
+			if index == 0 && found {
+				t.Fatalf("first redirect span unexpectedly has resend count %v", resend.Value)
+			}
+			if index == 1 && (!found || resend.Value.AsInt64() != 1) {
+				t.Fatalf("redirect resend count = (%v, %t), want 1", resend.Value, found)
+			}
+		}
+		if intAttribute(spans[0].attributes, string(semconv.HTTPResponseStatusCodeKey)) != http.StatusTemporaryRedirect || spans[0].status == codes.Error {
+			t.Fatalf("first physical span = %#v, want non-error 307 response", spans[0])
+		}
+	})
+
+	t.Run("rejected redirect has no resend", func(t *testing.T) {
+		traces := newTestTracerProvider()
+		calls := 0
+		transport, err := NewTransport(roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusPermanentRedirect,
+				Header:     http.Header{"Location": []string{"/final"}},
+				Body:       http.NoBody,
+				Request:    request,
+			}, nil
+		}), Config{TracerProvider: traces})
+		if err != nil {
+			t.Fatalf("NewTransport() error = %v", err)
+		}
+		ctx := WithExecutionAttempt(WithOperation(context.Background(), "payments", "payments.create"), 1)
+		request, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.test/start", strings.NewReader("payload"))
+		response, err := (&http.Client{
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("redirect rejected")
+			},
+		}).Do(request)
+		if err == nil || response == nil || response.StatusCode != http.StatusPermanentRedirect || calls != 1 {
+			t.Fatalf("Client.Do() = (%v, %v) with %d calls, want rejected redirect", response, err, calls)
+		}
+
+		spans := traces.spans()
+		if len(spans) != 1 || spans[0].name != http.MethodPost || intAttribute(spans[0].attributes, clientkitotel.AttributeAttemptNumber) != 1 {
+			t.Fatalf("spans = %#v, want one POST RoundTrip in execution attempt 1", spans)
+		}
+		if _, found := findAttribute(spans[0].attributes, semconv.HTTPRequestResendCountKey); found {
+			t.Fatalf("rejected redirect span unexpectedly has resend count: %#v", spans[0])
+		}
+		if intAttribute(spans[0].attributes, string(semconv.HTTPResponseStatusCodeKey)) != http.StatusPermanentRedirect || spans[0].status == codes.Error {
+			t.Fatalf("physical span = %#v, want non-error 308 response", spans[0])
+		}
+	})
+}
+
 func TestTransportEndsSpanAtHeadersWithoutOwningResponseBody(t *testing.T) {
 	traces := newTestTracerProvider()
 	body := &trackedBody{Reader: strings.NewReader("payload")}
@@ -392,9 +485,10 @@ func TestTransportDoesNotEmitStandardMetricsByDefault(t *testing.T) {
 
 func TestTransportClassifiesCancellationAndInvalidTransportResults(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		fn   roundTripperFunc
-		want string
+		name        string
+		fn          roundTripperFunc
+		want        string
+		wantInvalid bool
 	}{
 		{
 			name: "canceled",
@@ -408,7 +502,8 @@ func TestTransportClassifiesCancellationAndInvalidTransportResults(t *testing.T)
 			fn: func(*http.Request) (*http.Response, error) {
 				return nil, nil
 			},
-			want: "_OTHER",
+			want:        "_OTHER",
+			wantInvalid: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -424,6 +519,9 @@ func TestTransportClassifiesCancellationAndInvalidTransportResults(t *testing.T)
 			}
 			if test.want == "canceled" && !errors.Is(gotErr, context.Canceled) {
 				t.Fatalf("RoundTrip() error = %v, want context.Canceled", gotErr)
+			}
+			if test.wantInvalid && !errors.Is(gotErr, ErrInvalidTransportResult) {
+				t.Fatalf("RoundTrip() error = %v, want invalid transport result marker", gotErr)
 			}
 			span := traces.spans()[0]
 			if span.status != codes.Error || stringAttribute(span.attributes, string(semconv.ErrorTypeKey)) != test.want {

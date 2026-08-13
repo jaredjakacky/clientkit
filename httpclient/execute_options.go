@@ -7,11 +7,12 @@ import (
 	"github.com/jaredjakacky/clientkit/internal/configvalue"
 )
 
-// ExecuteOptions supplies explicit per-request response, retry, retry-safety, and
-// timeout policy. A non-nil ResponseClassifier completely overrides the client
-// classifier for this call; a zero ExecutionRetry inherits the client retry
-// policy, RetrySafetyDefault uses built-in HTTP method semantics, and zero
-// timeout fields inherit client-level values.
+// ExecuteOptions supplies explicit per-request response, retry, repetition-safety,
+// and timeout policy. A non-nil ResponseClassifier completely overrides the
+// client classifier for this call; a zero ExecutionRetry inherits the client
+// retry policy, RetrySafetyDefault uses built-in HTTP method semantics for
+// retries and 307/308 redirects, and zero timeout fields inherit client-level
+// values.
 type ExecuteOptions struct {
 	// Operation supplies a stable, low-cardinality semantic name for this logical
 	// execution. Zero uses OperationHTTPRequest. Custom names use the restricted
@@ -30,11 +31,13 @@ type ExecuteOptions struct {
 	// are resolved per call without mutating Client, and health-check retry policy
 	// is unaffected.
 	Retry ExecutionRetry
-	// RetrySafety controls whether repeating this operation is semantically
-	// authorized. RetryConfig.Methods and body replayability remain independent
-	// requirements. POST, PATCH, CONNECT, and custom methods require
-	// RetrySafetyIdempotent, which is a caller assertion rather than a Clientkit
-	// guarantee. RetrySafetyNever disables retries for this operation.
+	// RetrySafety controls whether repeating this operation through a scheduled
+	// retry or method-preserving 307/308 redirect is semantically authorized.
+	// RetryConfig.Methods remains an independent requirement for scheduled
+	// retries, while body replayability remains a mechanical requirement. POST,
+	// PATCH, CONNECT, and custom methods require RetrySafetyIdempotent, which is a
+	// caller assertion rather than a Clientkit guarantee. RetrySafetyNever
+	// disables retries and rejects 307/308 redirects for this operation.
 	RetrySafety RetrySafety
 	// Timeouts overrides the client's total and per-attempt timeout policy
 	// field-by-field. Zero fields inherit client values. The total timeout spans
@@ -63,8 +66,9 @@ type ExecutionRetry struct {
 	// normalized and its slices are cloned before execution begins.
 	Config RetryConfig
 	// Disable performs one Clientkit execution attempt and schedules no automatic
-	// retries. Redirects may still cause multiple transport RoundTrips.
-	// It cannot be combined with Config.
+	// retries. RetrySafety separately controls 307/308 redirects; ordinary 301,
+	// 302, and 303 redirects may still cause multiple transport RoundTrips. Disable
+	// cannot be combined with Config.
 	Disable bool
 }
 

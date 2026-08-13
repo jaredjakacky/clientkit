@@ -18,6 +18,7 @@ import (
 
 var (
 	errRedirectLimitExceeded     = errors.New("stopped after 10 redirects")
+	errRedirectReplayNotAllowed  = errors.New("clientkit: method-preserving redirect is not authorized by HTTP retry safety")
 	errRequestURLRequired        = errors.New("clientkit: request URL is required")
 	errRequestURLMustBeAbsolute  = errors.New("clientkit: request URL must be absolute")
 	errRequestURLOpaque          = errors.New("clientkit: request URL must not use opaque form")
@@ -29,7 +30,7 @@ var (
 	errRequestMethod             = errors.New("clientkit: request method is invalid")
 	errRequestHostOverride       = errors.New("clientkit: request Host override is not allowed")
 	errRequestOriginMismatch     = errors.New("clientkit: request URL must match configured base URL origin")
-	errHTTPTransportNoResponse   = errors.New("clientkit: HTTP transport returned no response and no error")
+	errHTTPTransportNoResponse   = httpotel.ErrInvalidTransportResult
 )
 
 type executionPolicy struct {
@@ -63,7 +64,9 @@ func (c *Client) Execute(request *http.Request) Result {
 // options classifier completely overrides the client classifier for this call.
 // Accepted responses are never retried; rejected responses may retry under the
 // selected retry policy only when RetrySafety authorizes repetition.
-// RetrySafetyNever disables retries for this call. Result.Err reports setup,
+// RetrySafety also authorizes method-preserving 307/308 redirects, while 301,
+// 302, and 303 retain ordinary net/http behavior. RetrySafetyNever disables
+// retries and rejects 307/308 redirects for this call. Result.Err reports setup,
 // request, and transport execution errors, and the caller owns any final
 // response body. ExecuteWithOptions takes ownership of a non-nil request body
 // and closes it even when validation prevents the first execution attempt.
@@ -240,7 +243,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 		attemptCapacity = maxInitialAttemptCapacity
 	}
 	attempts := make([]Attempt, 0, attemptCapacity)
-	httpClient := c.executionHTTPClient()
+	httpClient := c.executionHTTPClient(policy.retrySafety)
 
 	for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
 		if err := totalCtx.Err(); err != nil {
@@ -355,7 +358,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 			failureClass != clientkit.FailurePolicy &&
 			retryAuthorization.allowsRetry() &&
 			requestBodyIsReplayable(request) &&
-			policy.retry.shouldRetry(method, outcome, statusCode)
+			policy.retry.shouldRetry(method, outcome, failureClass, statusCode, err)
 
 		if !retry {
 			finalResult := Result{
@@ -397,7 +400,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 				}
 			}
 		}
-		closeResponse(response)
+		drainAndCloseResponse(attemptCtx, response)
 		attemptCancel()
 		retryAttributes := httpExecutionAttributes(attemptRequest.Method, statusCode, policy.attributes)
 		retryAttributes = append(retryAttributes, opskit.Attr("http.retry_delay_source", retryDelaySource))
@@ -439,7 +442,7 @@ func (c *Client) do(request *http.Request, policy executionPolicy) (result Resul
 	}
 }
 
-func (c *Client) executionHTTPClient() *http.Client {
+func (c *Client) executionHTTPClient(retrySafety RetrySafety) *http.Client {
 	// Compose redirect and origin policy on a copy so execution never mutates a
 	// caller-owned http.Client or the Clientkit client's immutable configuration.
 	executionClient := *c.httpClient
@@ -452,6 +455,12 @@ func (c *Client) executionHTTPClient() *http.Client {
 	configuredCheckRedirect := executionClient.CheckRedirect
 
 	executionClient.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		// Preserve the response status before invoking caller code so a permissive
+		// callback cannot erase why net/http proposed this redirect.
+		redirectStatus := 0
+		if request != nil && request.Response != nil {
+			redirectStatus = request.Response.StatusCode
+		}
 		if configuredCheckRedirect != nil {
 			if err := configuredCheckRedirect(request, via); err != nil {
 				return err
@@ -463,10 +472,36 @@ func (c *Client) executionHTTPClient() *http.Client {
 			return err
 		}
 
-		return c.validateRequestOrigin(request)
+		if err := c.validateRequestOrigin(request); err != nil {
+			return err
+		}
+
+		return validateRedirectReplay(request, redirectStatus, retrySafety)
 	}
 
 	return &executionClient
+}
+
+func validateRedirectReplay(request *http.Request, redirectStatus int, retrySafety RetrySafety) error {
+	if request == nil {
+		return nil
+	}
+
+	switch redirectStatus {
+	case http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return nil
+	}
+
+	authorization, err := retryAuthorizationFor(request.Method, retrySafety)
+	if err != nil {
+		return err
+	}
+	if !authorization.allowsRetry() {
+		return errRedirectReplayNotAllowed
+	}
+
+	return nil
 }
 
 func (c *Client) validateRequestOrigin(request *http.Request) error {
@@ -522,6 +557,7 @@ func (c *Client) validateRequestOrigin(request *http.Request) error {
 
 func isRequestPolicyError(err error) bool {
 	return errors.Is(err, errRedirectLimitExceeded) ||
+		errors.Is(err, errRedirectReplayNotAllowed) ||
 		errors.Is(err, errRequestURLRequired) ||
 		errors.Is(err, errRequestURLMustBeAbsolute) ||
 		errors.Is(err, errRequestURLOpaque) ||

@@ -59,7 +59,8 @@ type Result struct {
 	// StatusCode is the final response status, or zero when no response exists.
 	StatusCode int
 	// Response is the final caller-owned response, when one exists. The caller
-	// must close any open body.
+	// must close any open body. When Err reports redirect-policy rejection,
+	// net/http returns the redirect response with its body already closed.
 	Response *http.Response
 	// StartedAt is the operation start time.
 	StartedAt time.Time

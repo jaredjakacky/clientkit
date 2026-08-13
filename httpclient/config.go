@@ -57,6 +57,7 @@ type Config struct {
 	// Check configures explicit health checking. Its zero value is disabled.
 	Check CheckConfig
 	// Retry configures ordinary requests. Its zero value selects
-	// DefaultRetryConfig and does not affect health-check retries.
+	// DefaultRetryConfig, including classified transport-error behavior, and does
+	// not affect health-check retries.
 	Retry RetryConfig
 }
