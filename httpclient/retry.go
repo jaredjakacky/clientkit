@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jaredjakacky/clientkit"
 )
 
 // RetryConfig defines a complete retry policy. Containers define its zero-value
@@ -17,9 +19,11 @@ import (
 // performs one attempt with no automatic retries. Any non-zero value is a
 // complete replacement rather than a merge with defaults. MaxAttempts includes
 // the initial request. Requests with non-replayable bodies are never retried.
+// TransportErrors and RetryTimeouts independently control transport failures.
 // RetrySafety is an independent semantic gate: configured methods retry only
 // when the operation is intrinsically idempotent or explicitly asserted
-// idempotent.
+// idempotent. RetrySafety also governs method-preserving redirects independently
+// of this configuration.
 type RetryConfig struct {
 	// MaxAttempts is the total attempt limit, including the initial request.
 	MaxAttempts int
@@ -36,8 +40,10 @@ type RetryConfig struct {
 	// Methods lists exact request methods eligible for retry. RetrySafety and
 	// body replayability remain independent gates.
 	Methods []string
-	// RetryTransportErrors permits retries for non-timeout transport failures.
-	RetryTransportErrors bool
+	// TransportErrors controls retries for non-timeout transport failures.
+	// Its zero value disables them. DefaultRetryConfig selects
+	// TransportRetryDefault.
+	TransportErrors TransportRetryMode
 	// RetryTimeouts permits retries for attempt-level timeouts while the total
 	// operation context remains active.
 	RetryTimeouts bool
@@ -53,11 +59,14 @@ type RetryConfig struct {
 }
 
 // DefaultRetryConfig returns the production retry policy. Default retries are
-// limited to GET, HEAD, OPTIONS, PUT, and DELETE. Retry-After delta-seconds and
-// HTTP-date values are honored only for otherwise retryable responses, bounded
-// by DefaultMaxRetryAfter, and cannot shorten the policy delay or extend the
-// total operation context. Custom configurations are complete replacements;
-// callers changing selected defaults should modify this returned value.
+// limited to GET, HEAD, OPTIONS, PUT, and DELETE. Transient-looking and unknown
+// transport failures may retry, while recognized TLS failures, DNS not-found,
+// and invalid no-response/no-error transport results fail immediately.
+// Retry-After delta-seconds and HTTP-date values are honored only for otherwise
+// retryable responses, bounded by DefaultMaxRetryAfter, and cannot shorten the
+// policy delay or extend the total operation context. Custom configurations are
+// complete replacements; callers changing selected defaults should modify this
+// returned value.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		MaxAttempts:       DefaultRetryMaxAttempts,
@@ -82,8 +91,8 @@ func DefaultRetryConfig() RetryConfig {
 			http.MethodPut,
 			http.MethodDelete,
 		},
-		RetryTransportErrors: true,
-		RetryTimeouts:        true,
+		TransportErrors: TransportRetryDefault,
+		RetryTimeouts:   true,
 	}
 }
 
@@ -140,6 +149,9 @@ func validateRetryConfig(cfg RetryConfig) error {
 	if !cfg.RespectRetryAfter && cfg.MaxRetryAfter > 0 {
 		return errors.New("clientkit: retry max Retry-After must be zero when Retry-After is disabled")
 	}
+	if err := validateTransportRetryMode(cfg.TransportErrors); err != nil {
+		return err
+	}
 
 	statusCodes := make(map[int]struct{}, len(cfg.StatusCodes))
 	for _, statusCode := range cfg.StatusCodes {
@@ -177,13 +189,13 @@ func retryConfigIsZero(cfg RetryConfig) bool {
 		cfg.Jitter == 0 &&
 		cfg.StatusCodes == nil &&
 		cfg.Methods == nil &&
-		!cfg.RetryTransportErrors &&
+		cfg.TransportErrors == TransportRetryNone &&
 		!cfg.RetryTimeouts &&
 		!cfg.RespectRetryAfter &&
 		cfg.MaxRetryAfter == 0
 }
 
-func (cfg RetryConfig) shouldRetry(method string, outcome Outcome, statusCode int) bool {
+func (cfg RetryConfig) shouldRetry(method string, outcome Outcome, failureClass clientkit.FailureClass, statusCode int, err error) bool {
 	if !cfg.allowsMethod(method) {
 		return false
 	}
@@ -194,7 +206,7 @@ func (cfg RetryConfig) shouldRetry(method string, outcome Outcome, statusCode in
 	case OutcomeTimeout:
 		return cfg.RetryTimeouts
 	case OutcomeExecutionError:
-		return cfg.RetryTransportErrors
+		return cfg.TransportErrors.allows(failureClass, err)
 	default:
 		return false
 	}

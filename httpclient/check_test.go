@@ -2,7 +2,9 @@ package httpclient_test
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"net"
 	"net/http"
 	"reflect"
 	"strings"
@@ -239,6 +241,101 @@ func TestHTTPCheckFailureAndRetryPolicy(t *testing.T) {
 	})
 }
 
+func TestHTTPCheckMethodPreservingRedirectSafety(t *testing.T) {
+	tests := []struct {
+		name        string
+		retrySafety httpclient.RetrySafety
+		wantCalls   int
+		wantState   clientkit.HealthState
+		wantFailure clientkit.FailureClass
+	}{
+		{name: "default", wantCalls: 1, wantState: clientkit.HealthUnhealthy, wantFailure: clientkit.FailurePolicy},
+		{name: "never", retrySafety: httpclient.RetrySafetyNever, wantCalls: 1, wantState: clientkit.HealthUnhealthy, wantFailure: clientkit.FailurePolicy},
+		{name: "idempotent", retrySafety: httpclient.RetrySafetyIdempotent, wantCalls: 2, wantState: clientkit.HealthHealthy},
+	}
+	redirects := []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "temporary", statusCode: http.StatusTemporaryRedirect},
+		{name: "permanent", statusCode: http.StatusPermanentRedirect},
+	}
+
+	for _, redirect := range redirects {
+		for _, test := range tests {
+			t.Run(redirect.name+"/"+test.name, func(t *testing.T) {
+				observer := &healthRecordingObserver{}
+				calls := 0
+				client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+					calls++
+					if calls == 1 {
+						return redirectToStatus(request, redirect.statusCode, "/final", http.NoBody), nil
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+				}, httpclient.Config{
+					Config: clientkit.Config{Name: "redirect-health", Observer: observer},
+					Check: httpclient.CheckConfig{
+						Enabled:     true,
+						Method:      http.MethodPost,
+						Path:        "/healthz",
+						RetrySafety: test.retrySafety,
+					},
+				})
+				health := client.Check(context.Background())
+				if health.State != test.wantState || health.FailureClass != test.wantFailure || calls != test.wantCalls {
+					t.Fatalf("Check() = %#v with %d calls, want state %q, failure %q, and %d calls", health, calls, test.wantState, test.wantFailure, test.wantCalls)
+				}
+				if want := []string{"operation-start", "attempt", "operation-end", "health"}; !reflect.DeepEqual(observer.events, want) {
+					t.Fatalf("health lifecycle events = %v, want %v", observer.events, want)
+				}
+			})
+		}
+	}
+}
+
+func TestHTTPCheckUsesClassifiedTransportRetryPolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		firstErr    error
+		wantCalls   int
+		wantState   clientkit.HealthState
+		wantFailure clientkit.FailureClass
+	}{
+		{name: "TLS fails immediately", firstErr: tls.RecordHeaderError{Msg: "invalid TLS record"}, wantCalls: 1, wantState: clientkit.HealthUnhealthy, wantFailure: clientkit.FailureTLS},
+		{name: "DNS not found fails immediately", firstErr: &net.DNSError{Err: "no such host", Name: "missing.example.test", IsNotFound: true}, wantCalls: 1, wantState: clientkit.HealthUnhealthy, wantFailure: clientkit.FailureNameResolution},
+		{name: "temporary DNS retries", firstErr: &net.DNSError{Err: "server misbehaving", Name: "example.test", IsTemporary: true}, wantCalls: 2, wantState: clientkit.HealthHealthy},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observer := &healthRecordingObserver{}
+			calls := 0
+			client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return nil, test.firstErr
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+			}, httpclient.Config{
+				Config: clientkit.Config{Name: "transport-health", Observer: observer},
+				Check: httpclient.CheckConfig{
+					Enabled: true,
+					Path:    "/healthz",
+					Retry: httpclient.RetryConfig{
+						MaxAttempts:     2,
+						Methods:         []string{http.MethodGet},
+						TransportErrors: httpclient.TransportRetryDefault,
+					},
+				},
+			})
+			health := client.Check(context.Background())
+			if health.State != test.wantState || health.FailureClass != test.wantFailure || calls != test.wantCalls || observer.retryCount != test.wantCalls-1 {
+				t.Fatalf("Check() = %#v with calls/retries %d/%d, want state %q, failure %q, calls %d", health, calls, observer.retryCount, test.wantState, test.wantFailure, test.wantCalls)
+			}
+		})
+	}
+}
+
 func TestHTTPCheckDisabledAndNil(t *testing.T) {
 	calls := 0
 	observer := &healthRecordingObserver{}
@@ -261,6 +358,7 @@ type healthRecordingObserver struct {
 	clientkit.NopObserver
 	health      clientkit.HealthEvent
 	healthCount int
+	retryCount  int
 	events      []string
 }
 
@@ -273,6 +371,10 @@ func (o *healthRecordingObserver) StartOperation(ctx context.Context, _ clientki
 
 func (o *healthRecordingObserver) ObserveAttempt(context.Context, clientkit.AttemptEvent) {
 	o.events = append(o.events, "attempt")
+}
+
+func (o *healthRecordingObserver) ObserveRetry(context.Context, clientkit.RetryEvent) {
+	o.retryCount++
 }
 
 func (o *healthRecordingObserver) ObserveHealth(_ context.Context, event clientkit.HealthEvent) {

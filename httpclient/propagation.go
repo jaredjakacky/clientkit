@@ -156,5 +156,8 @@ func (t *propagatingRoundTripper) RoundTrip(request *http.Request) (*http.Respon
 		closeResponse(response)
 		return nil, err
 	}
+	if response == nil && err == nil {
+		return nil, errHTTPTransportNoResponse
+	}
 	return response, err
 }

@@ -42,7 +42,8 @@ their lifecycle from observer panics.
 
 ## Default HTTP topology
 
-One logical request with two retries produces three physical sends:
+One logical request with two retries produces three instrumented `RoundTrip`
+invocations:
 
 ```text
 application span
@@ -56,17 +57,43 @@ application span
 ```
 
 The logical span represents Clientkit policy: validation, attempts, retry waits,
-and final classification. Each physical `RoundTrip` owns a CLIENT span and
-injects trace context from that span, so every remote server span has the
-correct physical parent.
+and final classification. Each instrumented `RoundTrip` invocation owns a
+CLIENT span and injects trace context from that span, so every remote server
+span has the correct parent at that instrumentation boundary.
 
-Redirects can create multiple physical `RoundTrip` spans inside one Clientkit
-execution attempt. Attempt count and wire-send count are therefore related but
-not interchangeable.
+Redirects can create multiple `RoundTrip` spans inside one Clientkit execution
+attempt. Attempt count and instrumented `RoundTrip` invocation count are
+therefore related but not interchangeable.
+
+When Clientkit rejects a 307/308 replay, only the completed redirect
+`RoundTrip` is observed physically. That span records the 307/308 transport
+response and is not itself a transport error. The single logical attempt and
+operation end as `execution_error` with failure class `policy`, and no retry
+event is emitted. When an authorized redirect is followed, both `RoundTrip`
+spans carry the same Clientkit attempt number and the second carries resend
+count one.
+
+Transport spans count calls through the instrumented `RoundTripper`, not an
+absolute number of network sends. A wrapped transport, intermediary, or remote
+system can repeat work below that boundary. In particular, Go's standard
+`http.Transport` can transparently retry a narrow set of safe reused-connection
+failures inside one instrumented `RoundTrip` invocation; that does not create a
+new Clientkit attempt or retry event.
+
+When classified transport policy rejects repetition, the failed attempt and
+logical operation retain the original bounded `FailureClass`, but no retry event
+is emitted. When repetition is allowed, the retry event carries that same class.
+Raw errors are never introduced as metric labels.
 
 Logical and physical HTTP spans end when final headers or a terminal error are
 available. Body reads and closes do not extend spans. Clientkit timeouts still
 govern final body use and callers must close bodies promptly.
+
+Best-effort bounded cleanup of a Clientkit-owned retry response occurs after
+that attempt's header-based observation and before its retry event. Final
+health-check cleanup occurs before the health record is completed, so health
+duration includes it. Cleanup does not expose body content, create another
+attempt, or change the recorded response classification.
 
 ## Automatic HTTP instrumentation
 

@@ -61,10 +61,12 @@ type CheckConfig struct {
 	// another complete non-zero policy to enable retries explicitly. Retries
 	// consume the health-check timeout and may delay unhealthy results.
 	Retry RetryConfig
-	// RetrySafety controls semantic retry authorization independently from
-	// Retry.Methods and body replayability. POST, PATCH, CONNECT, and custom
-	// methods require RetrySafetyIdempotent, which is a caller assertion rather
-	// than a Clientkit guarantee. RetrySafetyNever disables check retries.
+	// RetrySafety controls semantic authorization for check retries and
+	// method-preserving 307/308 redirects. Retry.Methods remains independent for
+	// scheduled retries, and body replayability remains a mechanical requirement.
+	// POST, PATCH, CONNECT, and custom methods require RetrySafetyIdempotent, which
+	// is a caller assertion rather than a Clientkit guarantee. RetrySafetyNever
+	// disables check retries and rejects 307/308 redirects.
 	RetrySafety RetrySafety
 }
 
@@ -269,7 +271,7 @@ func (c *Client) Check(ctx context.Context) clientkit.Health {
 		message = "HTTP health check response was rejected"
 	}
 
-	closeResponse(result.Response)
+	drainAndCloseResponse(checkContext, result.Response)
 	return c.completeCheckHealth(checkContext, state, failureClass, message, startedAt, result.StatusCode)
 }
 

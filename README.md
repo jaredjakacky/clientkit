@@ -161,7 +161,7 @@ provides a stable, bounded classification suitable for policy and telemetry.
 `Result.Err` remains the original caller-visible Go error. Response rejection
 is policy information and does not manufacture a transport error.
 
-### Retries require authorization
+### Automatic repetition requires authorization
 
 An HTTP retry occurs only when all three independent gates allow it:
 
@@ -173,6 +173,19 @@ The default policy does not blindly retry POST, PATCH, CONNECT, or custom
 methods. Authorizing a POST with `RetrySafetyIdempotent` is an application
 assertion. Clientkit does not create or validate idempotency keys, and a retry
 after a timeout can duplicate a side effect.
+
+For eligible operations, the default retries connection refused, reset, closed,
+temporary or unknown DNS, and otherwise unclassified transport failures. It
+fails immediately for recognized TLS failures, DNS not-found, and a
+`RoundTripper` that returns neither a response nor an error.
+`TransportRetryNone` and `TransportRetryAll` provide explicit narrower and
+broader behavior; timeouts remain controlled separately.
+
+`RetrySafety` also governs method-preserving 307 and 308 redirects. The default
+follows them only for Clientkit's built-in idempotent methods,
+`RetrySafetyNever` rejects them, and `RetrySafetyIdempotent` permits them.
+Ordinary 301, 302, and 303 redirect behavior remains unchanged. A non-empty
+body still requires `Request.GetBody` before `net/http` can follow a 307 or 308.
 
 `http.NewRequest` and `http.NewRequestWithContext` populate `GetBody` for common
 in-memory readers such as `bytes.Buffer`, `bytes.Reader`, and `strings.Reader`.
@@ -229,8 +242,9 @@ When Clientkit owns the default HTTP client and no observer is supplied, it
 installs the complete default HTTP model:
 
 - One logical Clientkit HTTP operation represented by an INTERNAL span.
-- One CLIENT span for every physical `RoundTrip`, including retries and redirects.
-- Trace-context injection from the corresponding physical attempt span.
+- One CLIENT span for every instrumented `RoundTrip` invocation, including
+  retries and redirects.
+- Trace-context injection from the corresponding `RoundTrip` span.
 - Low-cardinality Clientkit operation, attempt, retry, and health metrics.
 
 A caller-owned HTTP client or a non-nil custom observer replaces part of that

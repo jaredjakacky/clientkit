@@ -91,6 +91,15 @@ promptly. Abandoning a body can prevent connection reuse and retain timeout
 contexts or transport resources. Disabling all timeout layers makes prompt
 caller cleanup even more important.
 
+Clientkit performs bounded connection hygiene only for responses it owns and
+discards. Eligible HTTP/1.x retry and health-check bodies are read to EOF or to
+a 64 KiB threshold plus one EOF-probe byte, then closed. The existing attempt or
+check deadline remains authoritative; without a live deadline, Clientkit closes
+without reading. HTTP/2, protocol upgrades, known larger bodies, and
+close-signaled responses are also close-only. Read or close errors are ignored
+because cleanup must not replace the classified operation result, and response
+content is never retained or emitted through telemetry.
+
 A caller-supplied `*http.Client` and its transport remain caller-owned.
 `CloseIdleConnections` can affect unrelated callers when a transport is shared.
 Stop new work and drain active requests before application shutdown cleanup.
@@ -110,6 +119,34 @@ is true:
 Clientkit does not generate, inspect, scope, or validate idempotency keys.
 Request-body replayability is only a mechanical requirement; it says nothing
 about semantic safety.
+
+`RetrySafety` applies to both Clientkit-scheduled retries and method-preserving
+307/308 redirects. The default rejects 307/308 for POST, PATCH, CONNECT, and
+custom methods; `RetrySafetyNever` rejects every 307/308; and
+`RetrySafetyIdempotent` explicitly authorizes them. Ordinary 301/302/303
+redirect behavior remains unchanged. A non-empty body also needs `GetBody`, but
+a bodyless unsafe operation still requires semantic authorization.
+
+This policy does not guarantee exactly-once delivery. A caller-supplied
+`RoundTripper`, the standard transport, intermediaries, or the remote system can
+repeat or partially process work outside Clientkit's retry and redirect loops.
+Application-level idempotency remains the authoritative protection.
+
+## Transport failure retries
+
+The production transport mode retries transient-looking or unclassified
+failures, including refused, reset, and closed connections and DNS failures that
+are not known to be not-found. It fails immediately for recognized TLS failures,
+DNS not-found, and an invalid no-response/no-error `RoundTripper` result. Those
+conditions normally require certificate, hostname, DNS, endpoint, or transport
+implementation repair rather than another identical attempt.
+
+`TransportRetryNone` disables non-timeout transport retries.
+`TransportRetryAll` deliberately restores broad retry behavior for unusual
+environments. `RetryTimeouts` remains a separate decision because a timed-out
+operation may already have committed remotely. Every transport mode remains
+subject to method policy, `RetrySafety`, body replayability, attempt limits, and
+the operation context.
 
 ## TLS safety
 
@@ -198,6 +235,7 @@ protocol identity rather than destinations.
 
 - Client and operation names come from a bounded static vocabulary.
 - POST and custom-method retries have a real idempotency strategy.
+- POST and custom-method 307/308 redirects have a real idempotency strategy.
 - Request bodies used for retries are replayable.
 - Every returned HTTP body and TCP connection is closed.
 - Base URL path resolution and redirect policy have been reviewed.

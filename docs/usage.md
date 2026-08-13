@@ -109,9 +109,34 @@ An attempt is repeated only when:
 2. `RetrySafety` authorizes repeating the complete operation.
 3. The request has no body or has a working `GetBody` function.
 
-The default policy retries selected transport failures, attempt timeouts, and
-408, 429, 500, 502, 503, and 504 responses. It is limited to GET, HEAD, OPTIONS,
-PUT, and DELETE. The maximum of three attempts includes the first request.
+The default policy retries attempt timeouts; connection refused, reset, and
+closed failures; temporary or otherwise unknown DNS failures; generic transport
+failures; and 408, 429, 500, 502, 503, and 504 responses. It fails immediately
+for recognized TLS failures, DNS not-found, and a `RoundTripper` that returns
+neither a response nor an error. It is limited to GET, HEAD, OPTIONS, PUT, and
+DELETE. The maximum of three attempts includes the first request.
+
+Non-timeout transport behavior is explicit in a complete retry policy:
+
+| Mode | Behavior |
+| --- | --- |
+| `TransportRetryNone` | Retry no non-timeout transport failures |
+| `TransportRetryDefault` | Use the classified production behavior above |
+| `TransportRetryAll` | Retry every non-timeout transport execution failure |
+
+`RetryTimeouts` remains independent. DNS timeouts therefore follow
+`RetryTimeouts`, while DNS not-found follows `TransportErrors`. Go documents
+that some DNS failures do not reliably report whether they are temporary, so
+the production mode retries an unclassified DNS error unless it is positively
+marked not-found.
+
+`TransportRetryAll` is the escape hatch for a caller that deliberately wants
+the pre-release broad behavior:
+
+```go
+retry := httpclient.DefaultRetryConfig()
+retry.TransportErrors = httpclient.TransportRetryAll
+```
 
 POST, PATCH, CONNECT, and custom methods do not pass the default semantic-safety
 gate. To retry a POST, both the policy and operation must opt in:
@@ -136,15 +161,44 @@ idempotent or application-level deduplication is in place. Clientkit neither
 creates nor validates an idempotency key. A timed-out request may already have
 committed remotely.
 
-Use `RetrySafetyNever` or `ExecutionRetry{Disable: true}` when an operation must
-make only one Clientkit attempt. Redirects may still cause more than one
-transport `RoundTrip`.
+### Redirect repetition safety
+
+`net/http` converts POST, PUT, DELETE, and other non-GET/HEAD methods to a
+bodyless GET when following 301, 302, or 303. Clientkit preserves that ordinary
+behavior in every `RetrySafety` mode.
+
+Status 307 and 308 are different: they preserve the upcoming request method and
+can resend the original body. Clientkit applies `RetrySafety` before allowing
+that next `RoundTrip`:
+
+| Retry safety | 307/308 behavior |
+| --- | --- |
+| `RetrySafetyDefault` | Follow only for GET, HEAD, OPTIONS, TRACE, PUT, and DELETE |
+| `RetrySafetyNever` | Reject the redirect |
+| `RetrySafetyIdempotent` | Follow, subject to body replayability, origin policy, and `CheckRedirect` |
+
+`RetryConfig.Methods`, statuses, and attempt limits do not govern redirects;
+they decide whether Clientkit schedules another execution attempt. Use
+`RetrySafetyNever` to disable retries and reject 307/308 for an operation. Use
+`ExecutionRetry{Disable: true}` when only scheduled retries should be disabled;
+redirects may still create multiple transport `RoundTrip` invocations.
+
+Redirect rejection follows standard `net/http` policy-error semantics. `Result`
+contains one failed Clientkit attempt, `OutcomeExecutionError`, `FailurePolicy`,
+the 307/308 response with its body already closed, and the wrapped redirect
+error. No retry is scheduled.
 
 ### Body replay and ownership
 
 A nil body and `http.NoBody` are replayable. A non-empty body requires
 `Request.GetBody`. Standard request constructors populate it for common
 `bytes.Buffer`, `bytes.Reader`, and `strings.Reader` values.
+
+This mechanical rule applies to both retries and 307/308 redirects. `net/http`
+does not propose a 307/308 redirect with a non-empty, non-replayable body; it
+returns that response normally instead. It recreates a replayable redirect body
+before invoking `CheckRedirect`, so `GetBody` can run even when a later caller,
+origin, or Clientkit safety check rejects the redirect.
 
 Retry bodies are created lazily only when another attempt starts. A
 non-replayable request can execute once but cannot retry.
@@ -157,6 +211,15 @@ body.
 The caller owns the final `Response.Body`. Read it to EOF or close it promptly.
 Closing enables timeout-context cleanup and allows the transport to reuse the
 connection where ordinary `net/http` rules permit.
+
+Responses that Clientkit definitively discards follow a narrower internal rule.
+For an eligible HTTP/1.x retry or health-check response, Clientkit reads at most
+64 KiB plus a one-byte EOF probe while an existing request deadline remains
+active, then closes the body. Reaching EOF can preserve the connection for the
+next request. Known larger bodies, HTTP/2 streams, protocol upgrades,
+close-signaled responses, and cleanup after cancellation are closed without
+draining. This best-effort behavior neither guarantees reuse nor changes caller
+ownership of any final response.
 
 ### Timeout layers
 
@@ -186,7 +249,10 @@ deadline can guarantee cleanup.
 
 A non-nil `Config.HTTPClient` replaces Clientkit's owned default. Clientkit does
 not mutate or claim it. Its value is copied so origin and redirect policy can be
-composed, while its transport and timeout behavior remain in force.
+composed with 307/308 repetition safety, while its transport and timeout
+behavior remain in force. A caller `CheckRedirect` rejection, including
+`http.ErrUseLastResponse`, takes precedence; a permissive callback cannot bypass
+Clientkit's origin or repetition-safety policy.
 
 Physical HTTP tracing is not automatically installed on a caller-owned client.
 Wrap its transport explicitly with `httpclient/otel.NewTransport` when desired.

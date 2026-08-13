@@ -27,8 +27,10 @@ func TestRetryRecreatesBodyWhenNextAttemptBegins(t *testing.T) {
 			t.Fatalf("close attempt body: %v", err)
 		}
 		statusCode := http.StatusServiceUnavailable
+		contentLength := int64(len("retry response"))
 		if attempt == 2 {
 			statusCode = http.StatusNoContent
+			contentLength = 0
 		}
 		responseBody := io.ReadCloser(http.NoBody)
 		if attempt == 1 {
@@ -38,11 +40,13 @@ func TestRetryRecreatesBodyWhenNextAttemptBegins(t *testing.T) {
 			}
 		}
 		return &http.Response{
-			StatusCode: statusCode,
-			Status:     fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
-			Header:     make(http.Header),
-			Body:       responseBody,
-			Request:    request,
+			StatusCode:    statusCode,
+			Status:        fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
+			ProtoMajor:    1,
+			Header:        make(http.Header),
+			Body:          responseBody,
+			ContentLength: contentLength,
+			Request:       request,
 		}, nil
 	})
 
@@ -162,16 +166,24 @@ func TestRetryRejectsInvalidRecreatedBodies(t *testing.T) {
 	}
 }
 
-func TestRetryClosesIntermediateResponsesWithoutDraining(t *testing.T) {
-	for _, contentLength := range []int64{-1, 0, 1024, 1 << 20} {
-		t.Run(fmt.Sprintf("content-length-%d", contentLength), func(t *testing.T) {
+func TestRetryDrainsEligibleIntermediateResponses(t *testing.T) {
+	for _, test := range []struct {
+		contentLength int64
+		wantReads     int
+	}{
+		{contentLength: -1, wantReads: 1},
+		{contentLength: 0},
+		{contentLength: 1024, wantReads: 1},
+		{contentLength: 1 << 20},
+	} {
+		t.Run(fmt.Sprintf("content-length-%d", test.contentLength), func(t *testing.T) {
 			intermediateBody := &countingResponseBody{}
 			attempt := 0
 			client := newHTTPTestClient(t, func(request *http.Request) (*http.Response, error) {
 				attempt++
 				status := http.StatusServiceUnavailable
 				body := io.ReadCloser(intermediateBody)
-				responseLength := contentLength
+				responseLength := test.contentLength
 				if attempt == 2 {
 					status = http.StatusNoContent
 					body = http.NoBody
@@ -179,6 +191,7 @@ func TestRetryClosesIntermediateResponsesWithoutDraining(t *testing.T) {
 				}
 				return &http.Response{
 					StatusCode:    status,
+					ProtoMajor:    1,
 					Header:        make(http.Header),
 					Body:          body,
 					ContentLength: responseLength,
@@ -194,8 +207,8 @@ func TestRetryClosesIntermediateResponsesWithoutDraining(t *testing.T) {
 			if result.Err != nil || result.Outcome != httpclient.OutcomeSuccess {
 				t.Fatalf("Execute() = %#v, want retry success", result)
 			}
-			if intermediateBody.reads != 0 || !intermediateBody.closed {
-				t.Fatalf("intermediate body reads/closed = %d/%t, want 0/true", intermediateBody.reads, intermediateBody.closed)
+			if intermediateBody.reads != test.wantReads || !intermediateBody.closed {
+				t.Fatalf("intermediate body reads/closed = %d/%t, want %d/true", intermediateBody.reads, intermediateBody.closed, test.wantReads)
 			}
 		})
 	}

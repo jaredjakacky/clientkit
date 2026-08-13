@@ -8,10 +8,14 @@
 // response classification accepts 2xx by default and may be overridden at the
 // client or individual request level. Accepted responses are never retried;
 // rejected responses remain subject to the configured retry policy. Automatic
-// retries also require semantic authorization: standard idempotent methods are
-// authorized by default, while POST, PATCH, CONNECT, and custom methods require
-// an explicit per-operation assertion. Health checks are disabled by default
-// and require both CheckConfig.Enabled and a relative path;
+// retries and method-preserving 307/308 redirects also require semantic
+// authorization: standard idempotent methods are authorized by default, while
+// POST, PATCH, CONNECT, and custom methods require an explicit per-operation
+// assertion. Ordinary 301, 302, and 303 redirects retain net/http behavior.
+// The default transport policy retries transient-looking and unknown failures,
+// but fails immediately for recognized TLS failures, DNS not-found, and an
+// invalid no-response/no-error RoundTripper result. Health checks are disabled
+// by default and require both CheckConfig.Enabled and a relative path;
 // DefaultCheckConfig is the usual way to enable them. Health checks have
 // independent timeout and retry policies. A zero health-check retry policy
 // performs one attempt; callers must assign DefaultRetryConfig or another

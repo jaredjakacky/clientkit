@@ -105,9 +105,12 @@ errors rather than replacing them.
 ### Retries and per-call options
 
 - `RetryConfig` is one complete retry policy.
+- `TransportRetryMode` selects no, production-default, or all non-timeout
+  transport-error retries without changing stable failure classification.
 - `DefaultRetryConfig` returns an independently mutable copy of defaults.
 - `NoRetryConfig` allows one Clientkit attempt.
-- `RetrySafety` independently authorizes semantic repetition.
+- `RetrySafety` independently authorizes semantic repetition through retries
+  and method-preserving 307/308 redirects.
 - `ExecutionRetry` selects an inherited, disabled, or complete per-call policy.
 - `ExecutionTimeouts` overrides total and attempt limits independently.
 - `ExecuteOptions` combines these per-call choices.

@@ -5,26 +5,32 @@ import (
 	"net/http"
 )
 
-// RetrySafety defines whether repeating one logical HTTP operation is
-// semantically authorized. RetryConfig.Methods remains an independent gate,
-// and request bodies must still be mechanically replayable. Clientkit neither
-// generates nor inspects idempotency keys, and Retry-After cannot authorize an
-// otherwise unsafe retry. Repeating a request after a timeout may duplicate
-// side effects unless the remote operation is genuinely idempotent or
-// application-level deduplication is in place.
+// RetrySafety defines whether Clientkit may automatically repeat one logical
+// HTTP operation with equivalent method semantics. It applies both to
+// Clientkit-scheduled retry attempts and to following method-preserving 307 and
+// 308 redirects. RetryConfig.Methods remains an independent gate for scheduled
+// retries, and request bodies must still be mechanically replayable. Clientkit
+// neither generates nor inspects idempotency keys, and Retry-After cannot
+// authorize an otherwise unsafe retry. Repeating a request after a timeout or
+// redirect may duplicate side effects unless the remote operation is genuinely
+// idempotent or application-level deduplication is in place. RetrySafety does
+// not control retries internal to a RoundTripper, intermediaries, or the remote
+// system and cannot guarantee exactly-once delivery.
 type RetrySafety string
 
 const (
 	// RetrySafetyDefault uses built-in HTTP method semantics. GET, HEAD,
-	// OPTIONS, TRACE, PUT, and DELETE may pass the safety gate; POST, PATCH,
-	// CONNECT, and custom methods do not.
+	// OPTIONS, TRACE, PUT, and DELETE may pass the retry and 307/308 redirect
+	// safety gate; POST, PATCH, CONNECT, and custom methods do not.
 	RetrySafetyDefault RetrySafety = ""
-	// RetrySafetyNever disables automatic retries for one operation while still
-	// allowing its initial Clientkit execution attempt.
+	// RetrySafetyNever disables automatic retries and rejects 307/308 redirects
+	// for one operation while still allowing its initial Clientkit execution
+	// attempt. It does not disable ordinary 301, 302, or 303 redirect handling.
 	RetrySafetyNever RetrySafety = "never"
-	// RetrySafetyIdempotent asserts that repeating the complete operation is
-	// semantically safe. This is an application assertion, not a Clientkit
-	// guarantee, and body replayability and all other retry gates still apply.
+	// RetrySafetyIdempotent asserts that repeating the complete operation through
+	// a retry or 307/308 redirect is semantically safe. This is an application
+	// assertion, not a Clientkit guarantee, and body replayability and all other
+	// applicable policy gates still apply.
 	RetrySafetyIdempotent RetrySafety = "idempotent"
 )
 

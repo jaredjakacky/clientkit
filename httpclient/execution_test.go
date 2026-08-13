@@ -413,7 +413,7 @@ func TestHTTPConfiguredRedirectPolicy(t *testing.T) {
 			HTTPClient: &http.Client{
 				CheckRedirect: func(*http.Request, []*http.Request) error { return rejection },
 			},
-			Retry: httpclient.RetryConfig{MaxAttempts: 2, Methods: []string{http.MethodGet}, RetryTransportErrors: true},
+			Retry: httpclient.RetryConfig{MaxAttempts: 2, Methods: []string{http.MethodGet}, TransportErrors: httpclient.TransportRetryAll},
 		})
 		request, _ := http.NewRequest(http.MethodGet, "https://example.test/start", nil)
 		result := client.Execute(request)
