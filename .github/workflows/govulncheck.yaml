@@ -40,3 +40,23 @@ jobs:
 
       - name: Run govulncheck
         run: make govulncheck
+
+  required-vulnerability-scan:
+    name: Required Vulnerability Scan
+    if: ${{ always() }}
+    needs: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Require successful vulnerability scans
+        shell: bash
+        env:
+          GOVULNCHECK_RESULT: ${{ needs.govulncheck.result }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GOVULNCHECK_RESULT" != "success" ]]; then
+            printf 'govulncheck=%s\n' "$GOVULNCHECK_RESULT"
+            exit 1
+          fi

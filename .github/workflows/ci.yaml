@@ -65,3 +65,24 @@ jobs:
 
       - name: Run race detector
         run: make test-race
+
+  required-ci:
+    name: Required CI
+    if: ${{ always() }}
+    needs: [verify, race]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions: {}
+    steps:
+      - name: Require successful CI jobs
+        shell: bash
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          RACE_RESULT: ${{ needs.race.result }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$VERIFY_RESULT" != "success" || "$RACE_RESULT" != "success" ]]; then
+            printf 'verify=%s\nrace=%s\n' "$VERIFY_RESULT" "$RACE_RESULT"
+            exit 1
+          fi
