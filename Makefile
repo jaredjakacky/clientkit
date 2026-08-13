@@ -10,7 +10,7 @@ PKGS ?= ./...
 EXAMPLE_PKGS ?= $(shell $(GO_MODULE) list ./examples/...)
 COVER_PKGS ?= $(shell $(GO_MODULE) list $(PKGS) | grep -v '/examples/')
 GOFILES := $(filter-out $(shell git ls-files --deleted -- '*.go'),$(shell git ls-files -- '*.go'))
-GOVULNCHECK_VERSION ?= v1.6.0
+GOVULNCHECK_VERSION ?= v1.7.0
 COMPOSITION_EXAMPLE_DIR := examples/kit-series-composition
 RELEASE_CHECK_DIR := tools/releasecheck
 
