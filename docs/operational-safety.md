@@ -100,9 +100,11 @@ close-signaled responses are also close-only. Read or close errors are ignored
 because cleanup must not replace the classified operation result, and response
 content is never retained or emitted through telemetry.
 
-A caller-supplied `*http.Client` and its transport remain caller-owned.
-`CloseIdleConnections` can affect unrelated callers when a transport is shared.
-Stop new work and drain active requests before application shutdown cleanup.
+A caller-supplied `*http.Client` remains caller-owned. Clientkit shallow-copies
+its top-level fields during construction, while referenced transports, jars,
+and callback state remain shared and caller-owned. `CloseIdleConnections` can
+affect unrelated callers when the construction-time transport is shared. Stop
+new work and drain active requests before application shutdown cleanup.
 
 ## Retry safety
 

@@ -45,10 +45,14 @@ func (c *operationalClient) Health() clientkit.Health {
 }
 
 func (c *operationalClient) Check(ctx context.Context) clientkit.Health {
+	health := c.Health()
 	if c.check != nil {
-		return c.check(ctx)
+		health = c.check(ctx)
 	}
-	return c.Health()
+	c.mu.Lock()
+	c.health = health
+	c.mu.Unlock()
+	return health
 }
 
 func (c *operationalClient) HealthCheckEnabled() bool {
@@ -288,9 +292,18 @@ func TestRegistryCheckAll(t *testing.T) {
 
 	t.Run("checker panic is contained", func(t *testing.T) {
 		registry := clientkit.NewRegistry()
+		checkCalls := 0
 		client := &operationalClient{
 			name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
-			check: func(context.Context) clientkit.Health { panic("check") },
+			health: clientkit.Health{
+				State:     clientkit.HealthHealthy,
+				CheckedAt: time.Now().UTC().Add(-time.Minute),
+				Message:   "previously healthy",
+			},
+			check: func(context.Context) clientkit.Health {
+				checkCalls++
+				panic("check")
+			},
 		}
 		if err := registry.Register(client); err != nil {
 			t.Fatalf("Register() error = %v", err)
@@ -301,6 +314,10 @@ func TestRegistryCheckAll(t *testing.T) {
 		}
 		if summary.Results[0].Result.Message != "client health check panicked" {
 			t.Fatalf("panic message = %q, want stable message", summary.Results[0].Result.Message)
+		}
+		assertRegistryPassiveHealth(t, registry, clientkit.HealthUnhealthy, clientkit.FailurePolicy, "client health check panicked", opskit.StateNotReady, false)
+		if checkCalls != 1 {
+			t.Fatalf("active checks after passive projections = %d, want 1", checkCalls)
 		}
 	})
 
@@ -560,6 +577,80 @@ func TestRegistryCheckAllSerializesOverlappingChecksPerClient(t *testing.T) {
 	})
 }
 
+func TestRegistryCheckAllDoesNotClearNewerSyntheticHealthWithOlderAcceptedResult(t *testing.T) {
+	sanitizerEntered := make(chan struct{}, 1)
+	releaseSanitizer := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseSanitizer) })
+	}
+	defer release()
+
+	registry, err := clientkit.NewRegistryWithConfig(clientkit.RegistryConfig{
+		HealthSanitizer: func(_ string, health clientkit.Health) clientkit.Health {
+			sanitizerEntered <- struct{}{}
+			<-releaseSanitizer
+			return health
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistryWithConfig() error = %v", err)
+	}
+	client := &operationalClient{
+		name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+		health: clientkit.Health{
+			State:     clientkit.HealthHealthy,
+			CheckedAt: time.Now().UTC().Add(-time.Minute),
+			Message:   "previously healthy",
+		},
+		check: func(context.Context) clientkit.Health {
+			return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "checker completed"}
+		},
+	}
+	if err := registry.Register(client); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	firstDone := make(chan opskit.CheckSummary, 1)
+	go func() { firstDone <- registry.CheckAll(context.Background()) }()
+	select {
+	case <-sanitizerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first CheckAll did not enter registry sanitizer")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	secondDone := make(chan opskit.CheckSummary, 1)
+	go func() { secondDone <- registry.CheckAll(ctx) }()
+	select {
+	case summary := <-secondDone:
+		if summary.State != opskit.StateFailed || len(summary.Results) != 1 {
+			t.Fatalf("second CheckAll() = %#v, want failed serialized-wait result", summary)
+		}
+		if got := operationalAttribute(summary.Results[0].Result.Attributes, "failure_class"); got != string(clientkit.FailureTimeout) {
+			t.Fatalf("second failure_class = %q, want %q", got, clientkit.FailureTimeout)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second CheckAll did not honor its deadline while waiting for result publication")
+	}
+
+	release()
+	select {
+	case summary := <-firstDone:
+		if !summary.Ready || len(summary.Results) != 1 {
+			t.Fatalf("first CheckAll() = %#v, want accepted healthy result", summary)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first CheckAll did not finish after releasing sanitizer")
+	}
+
+	projected := registry.Snapshot().Clients[0].Health
+	if projected.State != clientkit.HealthUnknown || projected.FailureClass != clientkit.FailureTimeout {
+		t.Fatalf("Snapshot() health = %#v, want newer wait-timeout override", projected)
+	}
+}
+
 func TestRegistryCheckAllSharesConcurrencyBoundAcrossCalls(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		registry, err := clientkit.NewRegistryWithConfig(clientkit.RegistryConfig{MaxConcurrentChecks: 1})
@@ -633,17 +724,19 @@ func TestRegistryCheckAllClassifiesDeadlineWhileWaitingForGlobalPermit(t *testin
 	releaseSecond := make(chan struct{})
 	first := &operationalClient{
 		name: "first", policy: clientkit.ReadinessOptional, enabled: true,
+		health: clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC().Add(-time.Minute)},
 		check: func(context.Context) clientkit.Health {
 			entered <- "first"
-			return clientkit.Health{State: clientkit.HealthHealthy}
+			return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "first refreshed"}
 		},
 	}
 	second := &operationalClient{
 		name: "second", policy: clientkit.ReadinessOptional, enabled: true,
+		health: clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC().Add(-time.Minute)},
 		check: func(context.Context) clientkit.Health {
 			entered <- "second"
 			<-releaseSecond
-			return clientkit.Health{State: clientkit.HealthHealthy}
+			return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "second refreshed"}
 		},
 	}
 	if err := registry.RegisterAll(first, second); err != nil {
@@ -679,6 +772,10 @@ func TestRegistryCheckAllClassifiesDeadlineWhileWaitingForGlobalPermit(t *testin
 		}
 		if result.Result.Message != "client health check timed out before execution" {
 			t.Fatalf("deadline message = %q, want pre-execution timeout", result.Result.Message)
+		}
+		projected := registry.Snapshot().Clients[0].Health
+		if projected.State != clientkit.HealthUnknown || projected.FailureClass != clientkit.FailureTimeout {
+			t.Fatalf("Snapshot() first-client health = %#v, want timeout override over prior healthy cache", projected)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("overlapping CheckAll did not honor its deadline while waiting for the global permit")
@@ -722,10 +819,15 @@ func TestRegistryCheckAllRejectsLateCheckerResults(t *testing.T) {
 			release := make(chan struct{})
 			client := &operationalClient{
 				name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+				health: clientkit.Health{
+					State:     clientkit.HealthHealthy,
+					CheckedAt: time.Now().UTC().Add(-time.Minute),
+					Message:   "previously healthy",
+				},
 				check: func(ctx context.Context) clientkit.Health {
 					checkerContext <- ctx
 					<-release
-					return clientkit.Health{State: clientkit.HealthHealthy, Message: "late healthy result"}
+					return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "late healthy result"}
 				},
 			}
 			if err := registry.Register(client); err != nil {
@@ -772,6 +874,10 @@ func TestRegistryCheckAllRejectsLateCheckerResults(t *testing.T) {
 			if got := operationalAttribute(result.Attributes, "failure_class"); got != string(test.wantFailure) {
 				t.Fatalf("failure_class = %q, want %q", got, test.wantFailure)
 			}
+			if cached := client.Health(); cached.State != clientkit.HealthHealthy || cached.Message != "late healthy result" {
+				t.Fatalf("client Health() = %#v, want persisted late checker result", cached)
+			}
+			assertRegistryPassiveHealth(t, registry, clientkit.HealthUnknown, test.wantFailure, test.wantMessage, opskit.StateUnknown, false)
 		})
 	}
 }
@@ -795,7 +901,7 @@ func TestRegistryCheckAllRejectsResultWhenSanitizerCrossesCancellation(t *testin
 	client := &operationalClient{
 		name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
 		check: func(context.Context) clientkit.Health {
-			return clientkit.Health{State: clientkit.HealthHealthy}
+			return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "checker completed"}
 		},
 	}
 	if err := registry.Register(client); err != nil {
@@ -828,6 +934,125 @@ func TestRegistryCheckAllRejectsResultWhenSanitizerCrossesCancellation(t *testin
 	case <-time.After(time.Second):
 		t.Fatal("CheckAll did not return after releasing sanitizer")
 	}
+	if cached := client.Health(); cached.State != clientkit.HealthHealthy || cached.Message != "checker completed" {
+		t.Fatalf("client Health() = %#v, want persisted checker result", cached)
+	}
+	assertRegistryPassiveHealth(t, registry, clientkit.HealthUnknown, clientkit.FailureCanceled, "client health check canceled before result acceptance", opskit.StateUnknown, false)
+}
+
+func TestRegistryCheckAllRetainsTransientSanitizerFailure(t *testing.T) {
+	sanitizerCalls := 0
+	registry, err := clientkit.NewRegistryWithConfig(clientkit.RegistryConfig{
+		HealthSanitizer: func(_ string, health clientkit.Health) clientkit.Health {
+			sanitizerCalls++
+			if sanitizerCalls == 1 {
+				panic("sanitize")
+			}
+			return health
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRegistryWithConfig() error = %v", err)
+	}
+	client := &operationalClient{
+		name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+		health: clientkit.Health{
+			State:     clientkit.HealthHealthy,
+			CheckedAt: time.Now().UTC().Add(-time.Minute),
+			Message:   "previously healthy",
+		},
+		check: func(context.Context) clientkit.Health {
+			return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "checker completed"}
+		},
+	}
+	if err := registry.Register(client); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	summary := registry.CheckAll(context.Background())
+	if summary.Ready || len(summary.Results) != 1 {
+		t.Fatalf("CheckAll() = %#v, want one failed sanitizer result", summary)
+	}
+	result := summary.Results[0].Result
+	if result.State != opskit.StateUnknown || result.Message != "client health sanitizer failed" {
+		t.Fatalf("sanitizer result = %#v, want unknown policy failure", result)
+	}
+	if cached := client.Health(); cached.State != clientkit.HealthHealthy || cached.Message != "checker completed" {
+		t.Fatalf("client Health() = %#v, want persisted checker result", cached)
+	}
+	assertRegistryPassiveHealth(t, registry, clientkit.HealthUnknown, clientkit.FailurePolicy, "client health sanitizer failed", opskit.StateUnknown, false)
+	if sanitizerCalls != 1 {
+		t.Fatalf("sanitizer calls after passive projections = %d, want stored sanitized override without re-sanitization", sanitizerCalls)
+	}
+}
+
+func TestRegistrySyntheticHealthIsSupersededByLaterDirectCheck(t *testing.T) {
+	registry := clientkit.NewRegistry()
+	panicCheck := true
+	client := &operationalClient{
+		name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+		health: clientkit.Health{
+			State:     clientkit.HealthHealthy,
+			CheckedAt: time.Now().UTC().Add(-time.Minute),
+			Message:   "previously healthy",
+		},
+		check: func(context.Context) clientkit.Health {
+			if panicCheck {
+				panic("check")
+			}
+			return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "direct refresh succeeded"}
+		},
+	}
+	if err := registry.Register(client); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	summary := registry.CheckAll(context.Background())
+	if summary.Ready || len(summary.Results) != 1 || summary.Results[0].Result.CheckedAt == nil {
+		t.Fatalf("CheckAll() = %#v, want timestamped synthetic failure", summary)
+	}
+	assertRegistryPassiveHealth(t, registry, clientkit.HealthUnhealthy, clientkit.FailurePolicy, "client health check panicked", opskit.StateNotReady, false)
+
+	panicCheck = false
+	refreshed := client.Check(context.Background())
+	if !refreshed.CheckedAt.After(*summary.Results[0].Result.CheckedAt) {
+		t.Fatalf("direct check timestamp = %v, want after override %v", refreshed.CheckedAt, *summary.Results[0].Result.CheckedAt)
+	}
+	assertRegistryPassiveHealth(t, registry, clientkit.HealthHealthy, clientkit.FailureNone, "direct refresh succeeded", opskit.StateReady, true)
+}
+
+func TestRegistrySyntheticHealthIsClearedByLaterAcceptedCheckAll(t *testing.T) {
+	registry := clientkit.NewRegistry()
+	panicCheck := true
+	client := &operationalClient{
+		name: "payments", policy: clientkit.ReadinessRequired, enabled: true,
+		health: clientkit.Health{
+			State:     clientkit.HealthHealthy,
+			CheckedAt: time.Now().UTC().Add(-time.Minute),
+			Message:   "previously healthy",
+		},
+		check: func(context.Context) clientkit.Health {
+			if panicCheck {
+				panic("check")
+			}
+			return clientkit.Health{State: clientkit.HealthHealthy, Message: "registry refresh succeeded"}
+		},
+	}
+	if err := registry.Register(client); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	if summary := registry.CheckAll(context.Background()); summary.Ready {
+		t.Fatalf("first CheckAll() = %#v, want synthetic failure", summary)
+	}
+	panicCheck = false
+	if summary := registry.CheckAll(context.Background()); !summary.Ready {
+		t.Fatalf("second CheckAll() = %#v, want accepted healthy result", summary)
+	}
+
+	// The zero CheckedAt cannot supersede by timestamp, so healthy passive state
+	// proves the accepted Registry check explicitly cleared the older override.
+	assertRegistryPassiveHealth(t, registry, clientkit.HealthHealthy, clientkit.FailureNone, "registry refresh succeeded", opskit.StateReady, true)
 }
 
 func TestRegistryCheckAllCompletionWinsBeforeLaterCancellation(t *testing.T) {
@@ -869,12 +1094,17 @@ func TestRegistryCheckAllCancelsWhileWaitingForClient(t *testing.T) {
 			name:    "payments",
 			policy:  clientkit.ReadinessOptional,
 			enabled: true,
+			health: clientkit.Health{
+				State:     clientkit.HealthHealthy,
+				CheckedAt: time.Now().UTC().Add(-time.Minute),
+				Message:   "previously healthy",
+			},
 			check: func(context.Context) clientkit.Health {
 				callsMu.Lock()
 				checkCalls++
 				callsMu.Unlock()
 				<-releaseFirst
-				return clientkit.Health{State: clientkit.HealthHealthy}
+				return clientkit.Health{State: clientkit.HealthHealthy, CheckedAt: time.Now().UTC(), Message: "in-flight refresh succeeded"}
 			},
 		}
 		if err := registry.Register(client); err != nil {
@@ -905,13 +1135,69 @@ func TestRegistryCheckAllCancelsWhileWaitingForClient(t *testing.T) {
 		if got := operationalAttribute(canceled.Results[0].Result.Attributes, "failure_class"); got != string(clientkit.FailureCanceled) {
 			t.Fatalf("failure_class = %q, want %q", got, clientkit.FailureCanceled)
 		}
+		projected := registry.Snapshot().Clients[0].Health
+		if projected.State != clientkit.HealthUnknown || projected.FailureClass != clientkit.FailureCanceled {
+			t.Fatalf("Snapshot() health while first check is active = %#v, want canceled synthetic override", projected)
+		}
 
 		release()
 		synctest.Wait()
 		if summary := <-firstDone; !summary.Ready {
 			t.Fatalf("first CheckAll() = %#v, want ready after release", summary)
 		}
+		projected = registry.Snapshot().Clients[0].Health
+		if projected.State != clientkit.HealthHealthy || projected.Message != "in-flight refresh succeeded" {
+			t.Fatalf("Snapshot() health after later completed check = %#v, want client-owned success", projected)
+		}
 	})
+}
+
+func assertRegistryPassiveHealth(
+	t *testing.T,
+	registry *clientkit.Registry,
+	wantHealthState clientkit.HealthState,
+	wantFailure clientkit.FailureClass,
+	wantMessage string,
+	wantStatusState opskit.State,
+	wantReady bool,
+) {
+	t.Helper()
+
+	assertHealth := func(surface string, health clientkit.Health) {
+		t.Helper()
+		if health.State != wantHealthState || health.FailureClass != wantFailure || health.Message != wantMessage {
+			t.Fatalf("%s health = %#v, want state %q failure %q message %q", surface, health, wantHealthState, wantFailure, wantMessage)
+		}
+	}
+
+	snapshot := registry.Snapshot()
+	if len(snapshot.Clients) != 1 {
+		t.Fatalf("Snapshot clients = %d, want 1", len(snapshot.Clients))
+	}
+	assertHealth("Snapshot", snapshot.Clients[0].Health)
+
+	status := registry.Status(context.Background())
+	if status.State != wantStatusState || status.Ready != wantReady {
+		t.Fatalf("Status() = %#v, want state %q ready %t", status, wantStatusState, wantReady)
+	}
+
+	readiness := registry.Readiness(context.Background())
+	if readiness.Ready != wantReady || len(readiness.Items) != 1 {
+		t.Fatalf("Readiness() = %#v, want ready %t with one item", readiness, wantReady)
+	}
+	if readiness.Items[0].Ready != wantReady || readiness.Items[0].State != wantStatusState {
+		t.Fatalf("Readiness item = %#v, want state %q ready %t", readiness.Items[0], wantStatusState, wantReady)
+	}
+
+	inspection, err := registry.Inspect(context.Background())
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	inspected, ok := inspection.Details.(clientkit.RegistrySnapshot)
+	if !ok || len(inspected.Clients) != 1 {
+		t.Fatalf("Inspect().Details = %#v, want one-client RegistrySnapshot", inspection.Details)
+	}
+	assertHealth("Inspect", inspected.Clients[0].Health)
 }
 
 func checkAllWithDisabledClient(t *testing.T) opskit.CheckSummary {

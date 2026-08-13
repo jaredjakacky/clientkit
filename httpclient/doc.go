@@ -43,13 +43,16 @@
 // attached to a returned body until it completes, is closed, or its context is
 // done, so callers should still close bodies promptly.
 //
-// A caller-supplied HTTPClient is never mutated or automatically instrumented.
-// Likewise, a non-nil Observer completely replaces automatic observation. Use
-// otel.NewTransport on a caller-owned transport when physical OpenTelemetry
-// spans are wanted with either of those configurations. This explicit boundary
-// avoids duplicate spans when the supplied transport is already instrumented.
-// NopObserver and NopHeaderPropagator disable their respective behavior, while
-// the Multi variants compose behavior explicitly.
+// A caller-supplied HTTPClient is shallow-copied at construction. Clientkit does
+// not retain or mutate the supplied pointer, while its referenced transport,
+// jar, and callback state remain shared and caller-owned. The supplied transport
+// is not automatically instrumented. Likewise, a non-nil Observer completely
+// replaces automatic observation. Use otel.NewTransport on a caller-owned
+// transport when physical OpenTelemetry spans are wanted with either of those
+// configurations. This explicit boundary avoids duplicate spans when the
+// supplied transport is already instrumented. NopObserver and
+// NopHeaderPropagator disable their respective behavior, while the Multi
+// variants compose behavior explicitly.
 //
 // Global OpenTelemetry providers and the global text-map propagator are selected
 // when an observer, transport, or Client is constructed, so applications should

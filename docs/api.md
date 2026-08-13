@@ -80,6 +80,8 @@ errors rather than replacing them.
 - `Config` combines root configuration with base URL, HTTP client, origin,
   classifier, timeout, check, retry, and propagation policy.
 - `New` validates and constructs without I/O.
+- A supplied `Config.HTTPClient` is shallow-copied at construction; referenced
+  transports, jars, and callback state remain shared and caller-owned.
 - `DefaultTransport` returns an independent production transport.
 - `DefaultHTTPClient` returns an independent client using that transport.
 

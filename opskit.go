@@ -26,6 +26,13 @@ type clientCheckSlot struct {
 	completed bool
 }
 
+type clientHealthCheckOutcome struct {
+	health          Health
+	decidedAt       time.Time
+	synthetic       bool
+	contextRejected bool
+}
+
 // CheckAll concurrently executes enabled client checks with bounded concurrency
 // and returns results in deterministic name order. The configured concurrency
 // bound applies across overlapping CheckAll calls, and checks for the same
@@ -33,7 +40,9 @@ type clientCheckSlot struct {
 // cooperatively; a checker panic becomes a stable unhealthy result rather than
 // escaping the worker goroutine. After checker and sanitizer callbacks return,
 // results that crossed a cancellation or deadline boundary are rejected with
-// the corresponding stable failure classification.
+// the corresponding stable failure classification. Client-specific failures
+// synthesized by Registry remain visible to passive registry projections until
+// a later client-owned assessment supersedes them.
 func (r *Registry) CheckAll(ctx context.Context) opskit.CheckSummary {
 	startedAt := time.Now().UTC()
 	if r == nil {
@@ -65,17 +74,7 @@ func (r *Registry) CheckAll(ctx context.Context) opskit.CheckSummary {
 					continue
 				}
 				entry := checkers[index]
-				health, contextRejected := r.checkHealthSafely(ctx, entry.checker, entry.checkSlot)
-				if !contextRejected {
-					if err := ctx.Err(); err != nil {
-						health = clientHealthCheckContextFailure(err, "before result acceptance")
-					} else {
-						health = r.sanitizeHealth(entry.name, health)
-						if err := ctx.Err(); err != nil {
-							health = clientHealthCheckContextFailure(err, "before result acceptance")
-						}
-					}
-				}
+				health := r.checkClientHealth(ctx, entry)
 				slots[index] = clientCheckSlot{
 					result:    opskitNamedClientCheck(entry.name, entry.protocol, entry.policy, health),
 					completed: true,
@@ -112,39 +111,78 @@ scheduling:
 	return summary
 }
 
-func (r *Registry) checkHealthSafely(ctx context.Context, checker HealthChecker, checkSlot chan struct{}) (health Health, contextRejected bool) {
-	if checkSlot != nil {
+func (r *Registry) checkClientHealth(ctx context.Context, entry namedHealthChecker) Health {
+	if entry.checkSlot != nil {
 		select {
 		case <-ctx.Done():
-			return clientHealthCheckContextFailure(ctx.Err(), "before execution"), true
-		case <-checkSlot:
-			defer func() { checkSlot <- struct{}{} }()
+			outcome := clientHealthCheckContextOutcome(ctx.Err(), "before execution")
+			r.applyHealthCheckOutcome(entry.name, outcome.health, outcome.decidedAt, true)
+			return outcome.health
+		case <-entry.checkSlot:
+			defer func() { entry.checkSlot <- struct{}{} }()
 		}
 	}
+
+	outcome := r.checkHealthSafely(ctx, entry.checker)
+	if !outcome.contextRejected {
+		if err := ctx.Err(); err != nil {
+			outcome = clientHealthCheckContextOutcome(err, "before result acceptance")
+		} else {
+			var sanitizerPanicked bool
+			outcome.health, sanitizerPanicked = r.sanitizeHealthWithPanic(entry.name, outcome.health)
+			if sanitizerPanicked {
+				outcome.synthetic = true
+				outcome.decidedAt = time.Now().UTC()
+			}
+			if err := ctx.Err(); err != nil {
+				outcome = clientHealthCheckContextOutcome(err, "before result acceptance")
+			}
+		}
+	}
+	r.applyHealthCheckOutcome(entry.name, outcome.health, outcome.decidedAt, outcome.synthetic)
+	return outcome.health
+}
+
+func (r *Registry) checkHealthSafely(ctx context.Context, checker HealthChecker) (outcome clientHealthCheckOutcome) {
 	if !r.acquireCheckPermit(ctx) {
-		return clientHealthCheckContextFailure(ctx.Err(), "before execution"), true
+		return clientHealthCheckContextOutcome(ctx.Err(), "before execution")
 	}
 	defer r.releaseCheckPermit()
 	defer func() {
 		if recover() != nil {
 			if err := ctx.Err(); err != nil {
-				health = clientHealthCheckContextFailure(err, "before result acceptance")
-				contextRejected = true
+				outcome = clientHealthCheckContextOutcome(err, "before result acceptance")
 				return
 			}
-			health = Health{
-				State:        HealthUnhealthy,
-				CheckedAt:    time.Now().UTC(),
-				Message:      "client health check panicked",
-				FailureClass: FailurePolicy,
+			now := time.Now().UTC()
+			outcome = clientHealthCheckOutcome{
+				health: Health{
+					State:        HealthUnhealthy,
+					CheckedAt:    now,
+					Message:      "client health check panicked",
+					FailureClass: FailurePolicy,
+				},
+				decidedAt: now,
+				synthetic: true,
 			}
 		}
 	}()
-	health = checker.Check(ctx)
+	health := checker.Check(ctx)
+	decidedAt := time.Now().UTC()
 	if err := ctx.Err(); err != nil {
-		return clientHealthCheckContextFailure(err, "before result acceptance"), true
+		return clientHealthCheckContextOutcome(err, "before result acceptance")
 	}
-	return health, false
+	return clientHealthCheckOutcome{health: health, decidedAt: decidedAt}
+}
+
+func clientHealthCheckContextOutcome(err error, phase string) clientHealthCheckOutcome {
+	health := clientHealthCheckContextFailure(err, phase)
+	return clientHealthCheckOutcome{
+		health:          health,
+		decidedAt:       health.CheckedAt,
+		synthetic:       true,
+		contextRejected: true,
+	}
 }
 
 func clientHealthCheckContextFailure(err error, phase string) Health {

@@ -9,6 +9,7 @@ active Check or Registry.CheckAll
               │
               ▼
        sanitized cached Health
+      + exceptional Registry result
               │
         ┌─────┴──────────────┐
         ▼                    ▼
@@ -105,6 +106,17 @@ expected completion-to-completion refresh gap, including:
 Disabling staleness is explicit and means an old assessment may continue to be
 reported indefinitely.
 
+Registered clients own their normal cached health. If `Registry.CheckAll`
+creates a client-specific failure that the client could not persist—for example,
+because the checker panicked, the outer context rejected a returned result, or
+the Registry sanitizer panicked—the Registry retains only that exceptional
+projection. `Snapshot`, `Status`, `Readiness`, and `Inspect` use it instead of an
+older client assessment. A later accepted Registry check clears the projection;
+a later direct client check supersedes it through its newer `CheckedAt` value.
+The exceptional projection has no independent staleness timer: without a later
+assessment, the Registry still lacks trustworthy health. The Registry does not
+write into the client cache or duplicate ordinary health.
+
 ## The Registry
 
 Register clients during deterministic startup:
@@ -128,6 +140,8 @@ checks. `CheckAll`:
 - Serializes checks for the same client.
 - Contains checker and sanitizer panics.
 - Rejects results that return after the context has definitively ended.
+- Keeps client-specific failures it synthesizes visible to passive projections
+  until a later client assessment supersedes them.
 
 Check implementations must still cooperate with context cancellation. Clientkit
 does not create hidden goroutines to forcibly interrupt arbitrary callbacks.

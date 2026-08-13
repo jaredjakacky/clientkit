@@ -17,12 +17,15 @@ type Config struct {
 	// may replace or escape that path; it is not a path-confinement boundary.
 	BaseURL string
 	// HTTPClient replaces the default net/http client when non-nil. Clientkit
-	// still applies its contexts and request-origin policy and does not mutate or
-	// claim ownership of the supplied client. Its transport is not automatically
-	// instrumented; callers can wrap it explicitly with httpclient/otel when
-	// physical HTTP spans or standard HTTP metrics are wanted.
-	// Client.CloseIdleConnections uses this client directly; if its transport is
-	// shared, that call may affect other users of the same idle pool.
+	// shallow-copies its top-level value during New and does not mutate or retain
+	// the supplied pointer. Later assignments to its Transport, CheckRedirect,
+	// Jar, or Timeout fields do not alter the constructed Client. Referenced
+	// transports, jars, and callback state remain shared and caller-owned.
+	// Clientkit still applies its contexts and request-origin policy. The supplied
+	// transport is not automatically instrumented; callers can wrap it explicitly
+	// with httpclient/otel when physical HTTP spans or standard HTTP metrics are
+	// wanted. Client.CloseIdleConnections uses the construction-time transport;
+	// if it is shared, that call may affect other users of the same idle pool.
 	HTTPClient *http.Client
 	// Propagator completely replaces the default OpenTelemetry trace propagator
 	// when non-nil. Use NopHeaderPropagator to disable propagation or

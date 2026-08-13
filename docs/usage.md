@@ -247,19 +247,29 @@ deadline can guarantee cleanup.
 
 ### Caller-supplied HTTP clients
 
-A non-nil `Config.HTTPClient` replaces Clientkit's owned default. Clientkit does
-not mutate or claim it. Its value is copied so origin and redirect policy can be
-composed with 307/308 repetition safety, while its transport and timeout
-behavior remain in force. A caller `CheckRedirect` rejection, including
-`http.ErrUseLastResponse`, takes precedence; a permissive callback cannot bypass
-Clientkit's origin or repetition-safety policy.
+A non-nil `Config.HTTPClient` replaces Clientkit's owned default. During `New`,
+Clientkit shallow-copies the top-level `http.Client` value and does not retain or
+mutate the supplied pointer. Later assignments to the supplied client's
+`Transport`, `CheckRedirect`, `Jar`, or `Timeout` fields do not affect the
+constructed Clientkit client. The construction-time transport and jar objects,
+and any state captured by `CheckRedirect`, remain shared and caller-owned and
+must satisfy their ordinary `net/http` concurrency contracts. A nil supplied
+transport retains `net/http`'s normal fallback to the process-wide
+`http.DefaultTransport`.
+
+Clientkit takes another execution-local copy so origin and redirect policy can
+be composed with 307/308 repetition safety without mutating shared state. The
+construction-time transport and timeout behavior remain in force. A caller
+`CheckRedirect` rejection, including `http.ErrUseLastResponse`, takes
+precedence; a permissive callback cannot bypass Clientkit's origin or
+repetition-safety policy.
 
 Physical HTTP tracing is not automatically installed on a caller-owned client.
 Wrap its transport explicitly with `httpclient/otel.NewTransport` when desired.
 
-`Client.CloseIdleConnections` invokes the configured client's cleanup directly.
-If the HTTP client or transport is shared, this can affect other users of the
-same idle pool. Clientkit never calls it automatically.
+`Client.CloseIdleConnections` invokes cleanup on the construction-time
+transport. If that transport is shared, this can affect other users of the same
+idle pool. Clientkit never calls it automatically.
 
 ## TCP clients
 
