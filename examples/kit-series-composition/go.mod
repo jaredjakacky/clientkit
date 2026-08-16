@@ -5,9 +5,9 @@ go 1.25.0
 
 require (
 	github.com/jaredjakacky/clientkit v0.0.0
-	github.com/jaredjakacky/opskit v0.5.0
-	github.com/jaredjakacky/servekit v0.6.0
-	github.com/jaredjakacky/workerkit v0.7.0
+	github.com/jaredjakacky/opskit v0.6.0
+	github.com/jaredjakacky/servekit v0.8.0
+	github.com/jaredjakacky/workerkit v0.8.0
 )
 
 require (
