@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/jaredjakacky/clientkit?sort=semver)](https://github.com/jaredjakacky/clientkit/releases)
 [![CI](https://github.com/jaredjakacky/clientkit/actions/workflows/ci.yaml/badge.svg)](https://github.com/jaredjakacky/clientkit/actions/workflows/ci.yaml)
-[![Go Support](https://img.shields.io/badge/go%20support-1.25.x%20%7C%201.26.x-00ADD8)](https://github.com/jaredjakacky/clientkit/actions/workflows/ci.yaml)
+[![Go Support](https://img.shields.io/badge/go%20support-1.26.x%20%7C%201.26.x-00ADD8)](https://github.com/jaredjakacky/clientkit/actions/workflows/ci.yaml)
 [![License](https://img.shields.io/github/license/jaredjakacky/clientkit)](https://github.com/jaredjakacky/clientkit/blob/main/LICENSE)
 
 Clientkit is the outbound-client shell for Go services. It keeps HTTP and TCP

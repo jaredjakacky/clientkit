@@ -1,7 +1,7 @@
 module github.com/jaredjakacky/clientkit
 
 // renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
-go 1.25.0
+go 1.26
 
 require (
 	github.com/jaredjakacky/opskit v0.6.0

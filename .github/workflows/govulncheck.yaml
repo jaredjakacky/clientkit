@@ -25,9 +25,9 @@ jobs:
       matrix:
         go-version:
           # renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
-          - '1.25.x'
-          # renovate: datasource=custom.go-supported-latest depName=go-latest versioning=semver-coerced
           - '1.26.x'
+          # renovate: datasource=custom.go-supported-latest depName=go-latest versioning=semver-coerced
+          - '1.27.x'
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
