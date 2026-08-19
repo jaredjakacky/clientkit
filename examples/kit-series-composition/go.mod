@@ -1,7 +1,7 @@
 module github.com/jaredjakacky/clientkit/examples/kit-series-composition
 
 // renovate: datasource=custom.go-supported-floor depName=go-floor versioning=semver-coerced
-go 1.25.0
+go 1.26
 
 require (
 	github.com/jaredjakacky/clientkit v0.0.0
